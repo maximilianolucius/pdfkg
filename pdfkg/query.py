@@ -1,0 +1,365 @@
+"""
+Question-answering functionality using the knowledge graph and embeddings.
+"""
+
+import os
+from pathlib import Path
+from typing import Any
+
+import faiss
+import networkx as nx
+import numpy as np
+import orjson
+import pandas as pd
+from dotenv import load_dotenv
+
+from pdfkg.embeds import encode_query
+
+# Load .env file
+load_dotenv()
+
+try:
+    import google.generativeai as genai
+
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+
+def load_artifacts(pdf_slug: str, storage) -> dict[str, Any]:
+    """
+    Load pipeline artifacts from storage backend.
+
+    Args:
+        pdf_slug: PDF slug identifier
+        storage: Storage backend instance
+
+    Returns:
+        Dict with keys: chunks, index, sections, figures, tables, graph.
+    """
+    print(f"DEBUG QUERY: Loading artifacts for PDF: {pdf_slug}")
+    artifacts = {}
+
+    # Load chunks
+    print(f"DEBUG QUERY: Loading chunks...")
+    artifacts["chunks"] = storage.get_chunks(pdf_slug)
+    print(f"DEBUG QUERY: Loaded {len(artifacts['chunks'])} chunks")
+
+    # Load FAISS index
+    print(f"DEBUG QUERY: Loading FAISS index...")
+    artifacts["index"] = storage.load_embeddings(pdf_slug)
+    print(f"DEBUG QUERY: FAISS index loaded, dimension: {artifacts['index'].d}, ntotal: {artifacts['index'].ntotal}")
+
+    # Load metadata
+    print(f"DEBUG QUERY: Loading metadata...")
+    artifacts["sections"] = storage.get_metadata(pdf_slug, "sections") or {}
+    artifacts["figures"] = storage.get_metadata(pdf_slug, "figures") or {}
+    artifacts["tables"] = storage.get_metadata(pdf_slug, "tables") or {}
+    print(f"DEBUG QUERY: Loaded {len(artifacts['sections'])} sections, {len(artifacts['figures'])} figures, {len(artifacts['tables'])} tables")
+
+    # Load graph if available
+    if hasattr(storage, 'get_graph'):
+        print(f"DEBUG QUERY: Loading graph...")
+        nodes, edges = storage.get_graph(pdf_slug)
+        print(f"DEBUG QUERY: Reconstructing NetworkX graph from {len(nodes)} nodes and {len(edges)} edges")
+        # Reconstruct NetworkX graph
+        G = nx.MultiDiGraph()
+        for node in nodes:
+            node_id = node.get("node_id")
+            G.add_node(node_id, **{k: v for k, v in node.items() if k != "node_id"})
+        for edge in edges:
+            from_id = edge.get("from_id")
+            to_id = edge.get("to_id")
+            if from_id and to_id:
+                G.add_edge(from_id, to_id, **{k: v for k, v in edge.items() if k not in ["from_id", "to_id", "_from", "_to"]})
+        artifacts["graph"] = G
+        print(f"DEBUG QUERY: Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    else:
+        print(f"DEBUG QUERY: Storage backend doesn't support graphs, using empty graph")
+        artifacts["graph"] = nx.MultiDiGraph()
+
+    return artifacts
+
+
+def retrieve_chunks(
+    question: str,
+    artifacts: dict[str, Any],
+    model_name: str,
+    top_k: int = 5,
+) -> list[dict]:
+    """
+    Retrieve most relevant chunks for a question using FAISS.
+
+    Args:
+        question: User question.
+        artifacts: Loaded artifacts dict.
+        model_name: Embedding model name.
+        top_k: Number of chunks to retrieve.
+
+    Returns:
+        List of chunk dicts with similarity scores.
+    """
+    print(f"DEBUG QUERY: Retrieving chunks for question: '{question}'")
+    print(f"DEBUG QUERY: Using model: {model_name}, top_k: {top_k}")
+
+    index = artifacts["index"]
+    expected_dim = getattr(index, "d", None)
+    if expected_dim is not None:
+        print(f"DEBUG QUERY: FAISS index expects dimension: {expected_dim}")
+
+    # Encode question
+    print(f"DEBUG QUERY: Encoding question...")
+    query_embedding = encode_query(question, model_name)
+    print(f"DEBUG QUERY: Query embedding shape: {query_embedding.shape}")
+
+    if expected_dim is not None and query_embedding.shape[1] != expected_dim:
+        raise ValueError(
+            f"Embedding dimension mismatch: model '{model_name}' produced "
+            f"{query_embedding.shape[1]} dimensions but FAISS index expects {expected_dim}. "
+            "Reprocess the PDF with the desired embedding model or configure the chat to use "
+            "the same model that was used during ingestion."
+        )
+
+    # Search FAISS index
+    print(f"DEBUG QUERY: Searching FAISS index...")
+    distances, indices = index.search(query_embedding, top_k)
+    print(f"DEBUG QUERY: FAISS search complete. Found {len(indices[0])} results")
+
+    # Get chunks with scores
+    results = []
+    chunks = artifacts["chunks"]
+    for i, (idx, score) in enumerate(zip(indices[0], distances[0])):
+        if idx < len(chunks):
+            chunk = chunks[idx].copy()
+            chunk["similarity_score"] = float(score)
+            chunk["rank"] = i + 1
+            results.append(chunk)
+            print(f"DEBUG QUERY:   Chunk {i+1}: idx={idx}, score={score:.3f}, section={chunk.get('section_id', 'N/A')}, page={chunk.get('page', 'N/A')}")
+
+    print(f"DEBUG QUERY: Retrieved {len(results)} chunks")
+    return results
+
+
+def find_related_nodes(
+    chunk_ids: list[str], graph: nx.MultiDiGraph, max_depth: int = 1
+) -> dict[str, list[str]]:
+    """
+    Find related nodes (figures, tables, sections) for given chunks.
+
+    Args:
+        chunk_ids: List of chunk IDs.
+        graph: Knowledge graph.
+        max_depth: Maximum traversal depth.
+
+    Returns:
+        Dict with keys: figures, tables, sections (lists of node IDs).
+    """
+    related = {"figures": set(), "tables": set(), "sections": set()}
+
+    for chunk_id in chunk_ids:
+        if not graph.has_node(chunk_id):
+            continue
+
+        # Find outgoing REFERS_TO edges
+        for _, target, data in graph.out_edges(chunk_id, data=True):
+            if data.get("type") == "REFERS_TO":
+                node_type = graph.nodes[target].get("type")
+                if node_type == "Figure":
+                    related["figures"].add(target)
+                elif node_type == "Table":
+                    related["tables"].add(target)
+                elif node_type == "Section":
+                    related["sections"].add(target)
+
+    return {k: list(v) for k, v in related.items()}
+
+
+def generate_answer_gemini(question: str, context_chunks: list[dict]) -> str:
+    """
+    Generate answer using Gemini.
+
+    Args:
+        question: User question.
+        context_chunks: Retrieved chunks with metadata.
+
+    Returns:
+        Generated answer.
+    """
+    if not GEMINI_AVAILABLE:
+        raise RuntimeError("google-generativeai not installed")
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    genai.configure(api_key=api_key)
+
+    # Get model name from environment or use default
+    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
+    # Build context
+    context_parts = []
+    for i, chunk in enumerate(context_chunks, 1):
+        context_parts.append(
+            f"[Chunk {i}] (Section: {chunk['section_id']}, Page: {chunk['page']})\n{chunk['text']}"
+        )
+    context = "\n\n".join(context_parts)
+
+    prompt = f"""You are a helpful assistant answering questions about a technical manual.
+
+Question: {question}
+
+Context from the manual:
+{context}
+
+Instructions:
+- Answer the question based ONLY on the provided context
+- Be specific and cite section/page references when possible
+- If the context doesn't contain enough information to answer, say so
+- Keep your answer concise and technical
+
+Answer:"""
+
+    model = genai.GenerativeModel(model_name)
+    response = model.generate_content(prompt)
+
+    return response.text
+
+
+def format_simple_answer(question: str, context_chunks: list[dict]) -> str:
+    """
+    Format a simple answer without LLM (just show relevant chunks).
+
+    Args:
+        question: User question.
+        context_chunks: Retrieved chunks with metadata.
+
+    Returns:
+        Formatted answer showing relevant chunks.
+    """
+    lines = [f"Question: {question}\n"]
+    lines.append("Relevant information from the manual:\n")
+
+    for i, chunk in enumerate(context_chunks, 1):
+        lines.append(
+            f"\n[{i}] Section {chunk['section_id']}, Page {chunk['page']} (similarity: {chunk['similarity_score']:.3f})"
+        )
+        lines.append(f"{chunk['text'][:500]}{'...' if len(chunk['text']) > 500 else ''}\n")
+
+    return "\n".join(lines)
+
+
+def answer_question(
+    question: str,
+    pdf_slug: str,
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    top_k: int = 5,
+    use_gemini: bool = False,
+    storage = None,
+) -> dict[str, Any]:
+    """
+    Answer a question using the knowledge graph.
+
+    Args:
+        question: User question.
+        pdf_slug: PDF slug identifier.
+        model_name: Embedding model name.
+        top_k: Number of chunks to retrieve.
+        use_gemini: Whether to use Gemini for answer generation.
+        storage: Storage backend instance (optional, will create if None).
+
+    Returns:
+        Dict with keys: question, answer, sources, related.
+    """
+    print(f"\nDEBUG QUERY: ========== answer_question START ==========")
+    print(f"DEBUG QUERY: Question: {question}")
+    print(f"DEBUG QUERY: PDF slug: {pdf_slug}")
+    print(f"DEBUG QUERY: Model: {model_name}")
+    print(f"DEBUG QUERY: Top K: {top_k}")
+    print(f"DEBUG QUERY: Use Gemini: {use_gemini}")
+
+    # Get storage backend if not provided
+    if storage is None:
+        print(f"DEBUG QUERY: No storage provided, getting default backend...")
+        from pdfkg.storage import get_storage_backend
+        storage = get_storage_backend()
+    else:
+        print(f"DEBUG QUERY: Using provided storage backend: {type(storage).__name__}")
+
+    stored_model = None
+    stored_dim = None
+    pdf_info = None
+    try:
+        pdf_info = storage.get_pdf_metadata(pdf_slug)
+        if pdf_info:
+            print("DEBUG QUERY: Loaded PDF metadata for embedding lookup")
+    except Exception as exc:
+        print(f"DEBUG QUERY: Failed to load PDF metadata: {exc}")
+
+    if pdf_info:
+        metadata = pdf_info.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        stored_model = metadata.get("embedding_model") or pdf_info.get("embedding_model")
+        stored_dim = metadata.get("embedding_dim") or pdf_info.get("embedding_dim")
+
+        if stored_model:
+            print(f"DEBUG QUERY: Detected stored embedding model: {stored_model}")
+            if stored_model != model_name:
+                print(
+                    "DEBUG QUERY: Overriding requested embedding model with stored model to "
+                    "match FAISS index"
+                )
+                model_name = stored_model
+        else:
+            print("DEBUG QUERY: No stored embedding model found in metadata")
+
+        if stored_dim:
+            print(f"DEBUG QUERY: Stored embedding dimension: {stored_dim}")
+    else:
+        print("DEBUG QUERY: PDF metadata not available; using requested embedding model")
+
+    # Load artifacts
+    print(f"DEBUG QUERY: Loading artifacts...")
+    artifacts = load_artifacts(pdf_slug, storage)
+
+    index_dim = getattr(artifacts.get("index", None), "d", None)
+    if stored_dim and index_dim and stored_dim != index_dim:
+        print(
+            f"DEBUG QUERY: Stored embedding dimension ({stored_dim}) does not match FAISS index "
+            f"dimension ({index_dim}). Using index dimension for validation."
+        )
+    elif not stored_dim and index_dim:
+        print(f"DEBUG QUERY: Using FAISS index dimension {index_dim} for validation")
+        stored_dim = index_dim
+
+    # Retrieve relevant chunks
+    print(f"DEBUG QUERY: Retrieving relevant chunks...")
+    chunks = retrieve_chunks(question, artifacts, model_name, top_k)
+
+    # Find related nodes
+    print(f"DEBUG QUERY: Finding related nodes...")
+    chunk_ids = [c.get("chunk_id") or c.get("id") for c in chunks]
+    print(f"DEBUG QUERY: Chunk IDs: {chunk_ids}")
+    related = find_related_nodes(chunk_ids, artifacts["graph"])
+    print(f"DEBUG QUERY: Related: {related}")
+
+    # Generate answer
+    print(f"DEBUG QUERY: Generating answer...")
+    if use_gemini:
+        print(f"DEBUG QUERY: Using Gemini for answer generation")
+        answer = generate_answer_gemini(question, chunks)
+    else:
+        print(f"DEBUG QUERY: Using simple answer format")
+        answer = format_simple_answer(question, chunks)
+
+    print(f"DEBUG QUERY: Answer generated successfully")
+    print(f"DEBUG QUERY: ========== answer_question END ==========\n")
+
+    return {
+        "question": question,
+        "answer": answer,
+        "sources": chunks,
+        "related": related,
+    }

@@ -1,0 +1,424 @@
+"""
+ArangoDB client for multi-PDF knowledge graph platform.
+"""
+
+import os
+from datetime import datetime
+from typing import Any, Optional
+
+from arango import ArangoClient
+from arango.database import StandardDatabase
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class ArangoDBClient:
+    """ArangoDB client for storing PDFs, chunks, and knowledge graphs."""
+
+    def __init__(
+        self,
+        host: str = None,
+        port: int = None,
+        username: str = None,
+        password: str = None,
+        db_name: str = None,
+    ):
+        """
+        Initialize ArangoDB client.
+
+        Args:
+            host: ArangoDB host (default: from env or localhost)
+            port: ArangoDB port (default: from env or 8529)
+            username: Username (default: from env or root)
+            password: Password (default: from env or empty)
+            db_name: Database name (default: from env or pdfkg)
+        """
+        self.host = host or os.getenv("ARANGO_HOST", "localhost")
+        self.port = int(port or os.getenv("ARANGO_PORT", "8529"))
+        self.username = username or os.getenv("ARANGO_USER", "root")
+        self.password = password or os.getenv("ARANGO_PASSWORD", "")
+        self.db_name = db_name or os.getenv("ARANGO_DB", "pdfkg")
+
+        # Initialize client
+        self.client = ArangoClient(hosts=f"http://{self.host}:{self.port}")
+        self.db: Optional[StandardDatabase] = None
+
+        # Collection names
+        self.PDFS = "pdfs"
+        self.NODES = "nodes"
+        self.EDGES = "edges"
+        self.CHUNKS = "chunks"
+
+    def connect(self) -> StandardDatabase:
+        """Connect to ArangoDB and create database if needed."""
+        # Connect to _system database first
+        sys_db = self.client.db("_system", username=self.username, password=self.password)
+
+        # Create database if it doesn't exist
+        if not sys_db.has_database(self.db_name):
+            sys_db.create_database(self.db_name)
+            print(f"Created database: {self.db_name}")
+
+        # Connect to target database
+        self.db = self.client.db(self.db_name, username=self.username, password=self.password)
+
+        # Initialize collections
+        self._init_collections()
+
+        return self.db
+
+    def _init_collections(self) -> None:
+        """Initialize collections and indexes."""
+        # PDFs collection (document)
+        if not self.db.has_collection(self.PDFS):
+            self.db.create_collection(self.PDFS)
+            # Index on slug for fast lookups
+            self.db.collection(self.PDFS).add_hash_index(fields=["slug"], unique=True)
+            print(f"Created collection: {self.PDFS}")
+
+        # Nodes collection (document) - pages, sections, paragraphs, figures, tables
+        if not self.db.has_collection(self.NODES):
+            self.db.create_collection(self.NODES)
+            # Indexes
+            self.db.collection(self.NODES).add_hash_index(fields=["pdf_slug"])
+            self.db.collection(self.NODES).add_hash_index(fields=["type"])
+            self.db.collection(self.NODES).add_hash_index(fields=["pdf_slug", "type"])
+            print(f"Created collection: {self.NODES}")
+
+        # Edges collection (edge) - relationships between nodes
+        if not self.db.has_collection(self.EDGES):
+            self.db.create_collection(self.EDGES, edge=True)
+            # Indexes
+            self.db.collection(self.EDGES).add_hash_index(fields=["pdf_slug"])
+            self.db.collection(self.EDGES).add_hash_index(fields=["type"])
+            print(f"Created collection: {self.EDGES}")
+
+        # Chunks collection (document) - optimized for text search
+        if not self.db.has_collection(self.CHUNKS):
+            self.db.create_collection(self.CHUNKS)
+            # Indexes
+            self.db.collection(self.CHUNKS).add_hash_index(fields=["pdf_slug"])
+            self.db.collection(self.CHUNKS).add_hash_index(fields=["section_id"])
+            self.db.collection(self.CHUNKS).add_hash_index(fields=["chunk_id"], unique=True)
+            # Full-text index on text
+            self.db.collection(self.CHUNKS).add_fulltext_index(fields=["text"])
+            print(f"Created collection: {self.CHUNKS}")
+
+    def register_pdf(
+        self,
+        slug: str,
+        filename: str,
+        num_pages: int,
+        num_chunks: int,
+        num_sections: int,
+        num_figures: int = 0,
+        num_tables: int = 0,
+        metadata: dict = None,
+    ) -> dict:
+        """
+        Register a processed PDF.
+
+        Args:
+            slug: PDF slug (unique identifier)
+            filename: Original filename
+            num_pages: Number of pages
+            num_chunks: Number of text chunks
+            num_sections: Number of sections
+            num_figures: Number of figures
+            num_tables: Number of tables
+            metadata: Additional metadata
+
+        Returns:
+            PDF document
+        """
+        pdf_doc = {
+            "_key": slug,
+            "slug": slug,
+            "filename": filename,
+            "processed_date": datetime.now().isoformat(),
+            "num_pages": num_pages,
+            "num_chunks": num_chunks,
+            "num_sections": num_sections,
+            "num_figures": num_figures,
+            "num_tables": num_tables,
+            "metadata": metadata or {},
+        }
+
+        # Insert or update
+        pdfs = self.db.collection(self.PDFS)
+        if pdfs.has(slug):
+            pdfs.update(pdf_doc)
+        else:
+            pdfs.insert(pdf_doc)
+
+        return pdf_doc
+
+    def get_pdf(self, slug: str) -> Optional[dict]:
+        """Get PDF metadata by slug."""
+        try:
+            return self.db.collection(self.PDFS).get(slug)
+        except:
+            return None
+
+    def list_pdfs(self) -> list[dict]:
+        """List all registered PDFs."""
+        cursor = self.db.aql.execute(
+            """
+            FOR pdf IN @@collection
+            SORT pdf.processed_date DESC
+            RETURN pdf
+            """,
+            bind_vars={"@collection": self.PDFS},
+        )
+        return list(cursor)
+
+    def pdf_exists(self, slug: str) -> bool:
+        """Check if PDF exists."""
+        return self.db.collection(self.PDFS).has(slug)
+
+    def delete_pdf(self, slug: str) -> bool:
+        """
+        Delete a PDF and all its associated data.
+
+        Args:
+            slug: PDF slug
+
+        Returns:
+            True if deleted, False if not found
+        """
+        if not self.pdf_exists(slug):
+            return False
+
+        # Delete chunks
+        self.db.aql.execute(
+            """
+            FOR chunk IN @@collection
+            FILTER chunk.pdf_slug == @slug
+            REMOVE chunk IN @@collection
+            """,
+            bind_vars={"@collection": self.CHUNKS, "slug": slug},
+        )
+
+        # Delete nodes
+        self.db.aql.execute(
+            """
+            FOR node IN @@collection
+            FILTER node.pdf_slug == @slug
+            REMOVE node IN @@collection
+            """,
+            bind_vars={"@collection": self.NODES, "slug": slug},
+        )
+
+        # Delete edges
+        self.db.aql.execute(
+            """
+            FOR edge IN @@collection
+            FILTER edge.pdf_slug == @slug
+            REMOVE edge IN @@collection
+            """,
+            bind_vars={"@collection": self.EDGES, "slug": slug},
+        )
+
+        # Delete PDF
+        self.db.collection(self.PDFS).delete(slug)
+
+        return True
+
+    def save_chunks(self, pdf_slug: str, chunks: list[dict]) -> None:
+        """
+        Save text chunks for a PDF.
+
+        Args:
+            pdf_slug: PDF slug
+            chunks: List of chunk dicts with keys: chunk_id, section_id, page, text
+        """
+        chunks_collection = self.db.collection(self.CHUNKS)
+
+        # Add pdf_slug to each chunk
+        for chunk in chunks:
+            chunk["pdf_slug"] = pdf_slug
+            chunk["_key"] = chunk["chunk_id"]
+
+        # Batch insert
+        chunks_collection.insert_many(chunks, overwrite=True)
+
+    def get_chunks(self, pdf_slug: str, limit: int = None) -> list[dict]:
+        """
+        Get all chunks for a PDF.
+
+        Args:
+            pdf_slug: PDF slug
+            limit: Maximum number of chunks to return
+
+        Returns:
+            List of chunk documents
+        """
+        query = """
+            FOR chunk IN @@collection
+            FILTER chunk.pdf_slug == @slug
+            SORT chunk.page, chunk.section_id
+            LIMIT @limit
+            RETURN chunk
+        """
+        cursor = self.db.aql.execute(
+            query,
+            bind_vars={
+                "@collection": self.CHUNKS,
+                "slug": pdf_slug,
+                "limit": limit or 999999,
+            },
+        )
+        return list(cursor)
+
+    def save_graph(self, pdf_slug: str, nodes: list[dict], edges: list[dict]) -> None:
+        """
+        Save knowledge graph nodes and edges.
+
+        Args:
+            pdf_slug: PDF slug
+            nodes: List of node dicts with keys: node_id, type, label, ...
+            edges: List of edge dicts with keys: _from, _to, type, ...
+        """
+        nodes_collection = self.db.collection(self.NODES)
+        edges_collection = self.db.collection(self.EDGES)
+
+        # Add pdf_slug and prepare keys
+        for node in nodes:
+            node["pdf_slug"] = pdf_slug
+            node["_key"] = node["node_id"].replace(":", "_").replace("/", "_")
+
+        for edge in edges:
+            edge["pdf_slug"] = pdf_slug
+            # ArangoDB edges need _from and _to in format "collection/key"
+            edge["_from"] = f"{self.NODES}/{edge['from_id'].replace(':', '_').replace('/', '_')}"
+            edge["_to"] = f"{self.NODES}/{edge['to_id'].replace(':', '_').replace('/', '_')}"
+
+        # Batch insert
+        nodes_collection.insert_many(nodes, overwrite=True)
+        edges_collection.insert_many(edges, overwrite=True)
+
+    def get_graph(self, pdf_slug: str) -> tuple[list[dict], list[dict]]:
+        """
+        Get knowledge graph for a PDF.
+
+        Args:
+            pdf_slug: PDF slug
+
+        Returns:
+            Tuple of (nodes, edges)
+        """
+        # Get nodes
+        nodes_cursor = self.db.aql.execute(
+            """
+            FOR node IN @@collection
+            FILTER node.pdf_slug == @slug
+            RETURN node
+            """,
+            bind_vars={"@collection": self.NODES, "slug": pdf_slug},
+        )
+        nodes = list(nodes_cursor)
+
+        # Get edges
+        edges_cursor = self.db.aql.execute(
+            """
+            FOR edge IN @@collection
+            FILTER edge.pdf_slug == @slug
+            RETURN edge
+            """,
+            bind_vars={"@collection": self.EDGES, "slug": pdf_slug},
+        )
+        edges = list(edges_cursor)
+
+        return nodes, edges
+
+    def save_metadata(self, pdf_slug: str, key: str, data: Any) -> None:
+        """
+        Save arbitrary metadata for a PDF.
+
+        Args:
+            pdf_slug: PDF slug
+            key: Metadata key (e.g., 'sections', 'toc', 'mentions')
+            data: Data to save
+        """
+        pdf = self.get_pdf(pdf_slug)
+        if not pdf:
+            raise ValueError(f"PDF not found: {pdf_slug}")
+
+        pdf["metadata"][key] = data
+        self.db.collection(self.PDFS).update({"_key": pdf_slug, "metadata": pdf["metadata"]})
+
+    def get_metadata(self, pdf_slug: str, key: str) -> Any:
+        """
+        Get metadata for a PDF.
+
+        Args:
+            pdf_slug: PDF slug
+            key: Metadata key
+
+        Returns:
+            Metadata value or None
+        """
+        pdf = self.get_pdf(pdf_slug)
+        if not pdf:
+            return None
+        return pdf.get("metadata", {}).get(key)
+
+    def search_chunks_fulltext(self, pdf_slug: str, query: str, limit: int = 10) -> list[dict]:
+        """
+        Full-text search in chunks.
+
+        Args:
+            pdf_slug: PDF slug (None for all PDFs)
+            query: Search query
+            limit: Maximum results
+
+        Returns:
+            List of matching chunks
+        """
+        if pdf_slug:
+            aql = """
+                FOR chunk IN FULLTEXT(@@collection, 'text', @query)
+                FILTER chunk.pdf_slug == @slug
+                LIMIT @limit
+                RETURN chunk
+            """
+            bind_vars = {"@collection": self.CHUNKS, "query": query, "slug": pdf_slug, "limit": limit}
+        else:
+            aql = """
+                FOR chunk IN FULLTEXT(@@collection, 'text', @query)
+                LIMIT @limit
+                RETURN chunk
+            """
+            bind_vars = {"@collection": self.CHUNKS, "query": query, "limit": limit}
+
+        cursor = self.db.aql.execute(aql, bind_vars=bind_vars)
+        return list(cursor)
+
+    def get_related_nodes(self, node_id: str, edge_types: list[str] = None, direction: str = "outbound") -> list[dict]:
+        """
+        Get nodes related to a given node via edges.
+
+        Args:
+            node_id: Source node ID
+            edge_types: List of edge types to follow (None for all)
+            direction: 'outbound', 'inbound', or 'any'
+
+        Returns:
+            List of related nodes
+        """
+        node_key = node_id.replace(":", "_").replace("/", "_")
+
+        if edge_types:
+            filter_clause = f"FILTER edge.type IN {edge_types}"
+        else:
+            filter_clause = ""
+
+        aql = f"""
+            FOR vertex, edge IN 1..1 {direction.upper()} '{self.NODES}/{node_key}' {self.EDGES}
+            {filter_clause}
+            RETURN vertex
+        """
+
+        cursor = self.db.aql.execute(aql)
+        return list(cursor)
