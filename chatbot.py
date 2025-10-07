@@ -13,6 +13,19 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Fix for macOS segfault - must be before any torch/transformers imports
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
+
+# Fix FAISS threading issues on macOS
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
 from pdfkg.query import answer_question
 from pdfkg.storage import get_storage_backend
 

@@ -45,6 +45,20 @@ class StorageBackend:
     def get_metadata(self, slug: str, key: str) -> Any:
         raise NotImplementedError
 
+    def load_chunks(self, slug: str) -> list[dict]:
+        """Alias for get_chunks for consistency."""
+        return self.get_chunks(slug)
+
+    def load_all_metadata(self, slug: str) -> dict:
+        """Load all metadata for a PDF."""
+        return {
+            'sections': self.get_metadata(slug, 'sections') or {},
+            'toc': self.get_metadata(slug, 'toc') or [],
+            'mentions': self.get_metadata(slug, 'mentions') or [],
+            'figures': self.get_metadata(slug, 'figures') or {},
+            'tables': self.get_metadata(slug, 'tables') or {},
+        }
+
 
 class ArangoStorage(StorageBackend):
     """ArangoDB storage backend."""
@@ -96,6 +110,26 @@ class ArangoStorage(StorageBackend):
 
     def get_graph(self, slug: str) -> tuple[list[dict], list[dict]]:
         return self.db_client.get_graph(slug)
+
+    def load_graph(self, slug: str):
+        """Load graph from database and convert to NetworkX."""
+        import networkx as nx
+        nodes_data, edges_data = self.get_graph(slug)
+
+        graph = nx.MultiDiGraph()
+
+        # Add nodes
+        for node in nodes_data:
+            node_id = node.pop('node_id')
+            graph.add_node(node_id, **node)
+
+        # Add edges
+        for edge in edges_data:
+            from_id = edge.pop('from_id')
+            to_id = edge.pop('to_id')
+            graph.add_edge(from_id, to_id, **edge)
+
+        return graph
 
 
 class FileStorage(StorageBackend):

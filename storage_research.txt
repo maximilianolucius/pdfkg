@@ -1,0 +1,132 @@
+  Answer to Question 3: Database Options for Multi-PDF Platform
+
+  For a production platform handling multiple PDFs, you'd want to replace the current file-based persistence with proper databases:
+
+  Current Architecture (File-based)
+
+  data/out/
+  ├── chunks.parquet          # Text chunks
+  ├── index.faiss            # Vector embeddings
+  ├── graph.{cypher,json}    # Knowledge graph
+  ├── mentions.parquet       # Cross-references
+  └── sections.json          # Document structure
+
+  Recommended Multi-PDF Architecture
+
+  1. Vector Databases (for embeddings/semantic search)
+
+  Best Options:
+
+  🥇 Qdrant (Recommended for your use case)
+  - ✅ Open source, self-hosted
+  - ✅ Built-in filtering (can filter by PDF/document)
+  - ✅ Fast, written in Rust
+  - ✅ Great Python SDK
+  - ✅ Supports metadata filtering
+  # Query specific PDF or all PDFs
+  results = qdrant.search(
+      collection_name="pdf_chunks",
+      query_vector=embedding,
+      query_filter={"pdf_id": "manual_123"}  # Optional
+  )
+
+  🥈 Weaviate
+  - ✅ GraphQL API
+  - ✅ Hybrid search (vector + keyword)
+  - ✅ Multi-tenancy support
+  - ❌ Heavier resource usage
+
+  🥉 Milvus
+  - ✅ Highly scalable (billions of vectors)
+  - ✅ Great for large deployments
+  - ❌ More complex setup
+  - ❌ Overkill for <10k documents
+
+  Honorable Mentions:
+  - ChromaDB: Super simple, embedded, good for prototypes
+  - Pinecone: Managed service, no self-hosting needed
+  - pgvector: PostgreSQL extension, if you already use Postgres
+
+  2. Graph Databases (for knowledge graph)
+
+  Best Options:
+
+  🥇 Neo4j
+  - ✅ Industry standard for graphs
+  - ✅ Cypher query language (you already export to Cypher!)
+  - ✅ Great visualization tools
+  - ✅ Can handle multi-document graphs
+  // Query across all PDFs
+  MATCH (doc:Document)-[:CONTAINS]->(section:Section)
+  WHERE doc.pdf_id IN ['manual1', 'manual2']
+  RETURN section
+
+  // Find cross-PDF references
+  MATCH (p1:Paragraph)-[:REFERS_TO]->(fig:Figure)<-[:CONTAINS]-(doc:Document)
+  WHERE p1.pdf_id <> doc.pdf_id
+  RETURN p1, fig, doc
+
+  🥈 ArangoDB
+  - ✅ Multi-model (graph + document + key-value)
+  - ✅ Can store chunks AND graph in same DB
+  - ✅ Built-in full-text search
+
+  🥉 NetworkX + MongoDB
+  - ✅ Your current graph + document store
+  - ❌ Less optimized for graph queries
+
+  3. Metadata & Document Store
+
+  PostgreSQL with pgvector
+  - ✅ Single DB for metadata + vectors
+  - ✅ ACID compliance
+  - ✅ JSON support for sections/mentions
+  CREATE TABLE pdfs (
+      id UUID PRIMARY KEY,
+      filename TEXT,
+      upload_date TIMESTAMP,
+      num_pages INT,
+      sections JSONB
+  );
+
+  CREATE TABLE chunks (
+      id UUID PRIMARY KEY,
+      pdf_id UUID REFERENCES pdfs(id),
+      text TEXT,
+      embedding vector(384),  -- pgvector
+      section_id TEXT,
+      page INT
+  );
+
+  MongoDB
+  - ✅ Flexible schema (good for varied PDF structures)
+  - ✅ Easy to store sections/mentions as nested documents
+  - ❌ No native vector search (need Atlas or plugin)
+
+  Recommended Stack for Your Platform
+
+  Option A: Simple Stack (Recommended for MVP)
+
+  📦 PDF Storage: Local filesystem (data/input/)
+  🔍 Vector Search: Qdrant (self-hosted)
+  🕸️  Knowledge Graph: Neo4j Community (self-hosted)
+  📊 Metadata: PostgreSQL
+
+  Why:
+  - Qdrant: Best balance of features/performance for embeddings
+  - Neo4j: Already export Cypher, natural fit
+  - PostgreSQL: Reliable, can store chunks.parquet data in tables
+
+  Option B: All-in-One Stack
+
+  📦 Everything: ArangoDB
+  - Multi-model DB handles vectors, graph, and documents
+  - Simpler deployment (one service)
+  - Trade-off: Not as optimized as specialized DBs
+
+  Option C: Cloud-Native Stack
+
+  🔍 Vector Search: Pinecone (managed)
+  🕸️  Knowledge Graph: Neo4j Aura (managed)
+  📊 Metadata: Supabase/PostgreSQL (managed)
+

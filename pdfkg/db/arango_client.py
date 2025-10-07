@@ -298,6 +298,9 @@ class ArangoDBClient:
         nodes_collection.insert_many(nodes, overwrite=True)
         edges_collection.insert_many(edges, overwrite=True)
 
+        # Create or update named graph for visualization
+        self._ensure_named_graph(pdf_slug)
+
     def get_graph(self, pdf_slug: str) -> tuple[list[dict], list[dict]]:
         """
         Get knowledge graph for a PDF.
@@ -422,3 +425,36 @@ class ArangoDBClient:
 
         cursor = self.db.aql.execute(aql)
         return list(cursor)
+
+    def _ensure_named_graph(self, pdf_slug: str) -> None:
+        """
+        Create or update a named graph for a PDF to enable visualization in ArangoDB UI.
+
+        Args:
+            pdf_slug: PDF slug
+        """
+        graph_name = f"graph_{pdf_slug}"
+
+        # Check if graph already exists
+        if self.db.has_graph(graph_name):
+            # Graph exists, just return
+            return
+
+        # Create named graph
+        # Note: This creates a graph that includes ALL edges in the edges collection
+        # that connect nodes in the nodes collection. We can filter by pdf_slug in queries.
+        try:
+            self.db.create_graph(
+                graph_name,
+                edge_definitions=[
+                    {
+                        "edge_collection": self.EDGES,
+                        "from_vertex_collections": [self.NODES],
+                        "to_vertex_collections": [self.NODES],
+                    }
+                ],
+            )
+            print(f"Created named graph: {graph_name}")
+        except Exception as e:
+            # Graph might already exist or other error
+            print(f"Note: Could not create named graph {graph_name}: {e}")

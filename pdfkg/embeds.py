@@ -8,6 +8,16 @@ import faiss
 
 from pdfkg.config import Chunk
 
+# Model cache to prevent repeated loading (fixes macOS semaphore leak)
+_model_cache = {}
+
+
+def _get_model(model_name: str) -> SentenceTransformer:
+    """Get or create cached model instance."""
+    if model_name not in _model_cache:
+        _model_cache[model_name] = SentenceTransformer(model_name, device="cpu")
+    return _model_cache[model_name]
+
 
 def embed_chunks(
     chunks: list[Chunk], model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -22,7 +32,7 @@ def embed_chunks(
     Returns:
         Numpy array of shape (n_chunks, dim) with normalized embeddings.
     """
-    model = SentenceTransformer(model_name, device="cpu")
+    model = _get_model(model_name)
     texts = [c.text for c in chunks]
     embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
     # Normalize for cosine similarity via inner product
@@ -57,7 +67,7 @@ def encode_query(text: str, model_name: str) -> np.ndarray:
     Returns:
         Normalized embedding vector.
     """
-    model = SentenceTransformer(model_name, device="cpu")
+    model = _get_model(model_name)
     embedding = model.encode([text], convert_to_numpy=True)
     embedding = embedding / np.linalg.norm(embedding, axis=1, keepdims=True)
     return embedding.astype(np.float32)

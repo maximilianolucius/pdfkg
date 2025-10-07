@@ -320,6 +320,13 @@ def answer_question(
     else:
         print("DEBUG QUERY: PDF metadata not available; using requested embedding model")
 
+    # Dimension to model mapping (common models)
+    DIM_TO_MODEL = {
+        384: "sentence-transformers/all-MiniLM-L6-v2",
+        768: "sentence-transformers/all-mpnet-base-v2",
+        1024: "BAAI/bge-large-en-v1.5",
+    }
+
     # Load artifacts
     print(f"DEBUG QUERY: Loading artifacts...")
     artifacts = load_artifacts(pdf_slug, storage)
@@ -330,9 +337,18 @@ def answer_question(
             f"DEBUG QUERY: Stored embedding dimension ({stored_dim}) does not match FAISS index "
             f"dimension ({index_dim}). Using index dimension for validation."
         )
+        stored_dim = index_dim
     elif not stored_dim and index_dim:
         print(f"DEBUG QUERY: Using FAISS index dimension {index_dim} for validation")
         stored_dim = index_dim
+
+    # If no model was stored but we have a dimension, auto-select model
+    if not stored_model and stored_dim and stored_dim in DIM_TO_MODEL:
+        auto_model = DIM_TO_MODEL[stored_dim]
+        print(f"DEBUG QUERY: No stored model found, auto-selecting based on dimension {stored_dim}: {auto_model}")
+        if auto_model != model_name:
+            print(f"DEBUG QUERY: Overriding requested model '{model_name}' with auto-detected '{auto_model}'")
+            model_name = auto_model
 
     # Retrieve relevant chunks
     print(f"DEBUG QUERY: Retrieving relevant chunks...")

@@ -18,20 +18,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import pipeline modules
-from pdfkg.parse_pdf import load_pdf, extract_pages, extract_toc
-from pdfkg.topology import build_section_tree
-from pdfkg.chunking import build_chunks
-from pdfkg.embeds import embed_chunks, build_faiss_index
-from pdfkg.figtables import index_figures_tables
-from pdfkg.xrefs import extract_mentions, resolve_mentions
-from pdfkg.graph import build_graph, export_graph
-from pdfkg.report import generate_report
 from pdfkg.query import answer_question
 from pdfkg.storage import get_storage_backend
-
-import faiss
-import pandas as pd
-import orjson
+from pdfkg.pdf_manager import ingest_pdf, auto_ingest_directory
 
 
 # Initialize storage backend (with error handling)
@@ -50,14 +39,15 @@ except Exception as e:
 current_pdf_slug = None
 
 
-def process_pdf(pdf_file, embed_model: str, max_tokens: int, progress=gr.Progress()) -> tuple:
+def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, progress=gr.Progress()) -> tuple:
     """
-    Process uploaded PDF and build knowledge graph.
+    Process uploaded PDF(s) and build knowledge graph.
 
     Args:
-        pdf_file: Uploaded PDF file
+        pdf_files: Uploaded PDF file(s) - can be single file or list of files
         embed_model: Embedding model name
         max_tokens: Max tokens per chunk
+        use_gemini: Enable Gemini visual analysis
         progress: Gradio progress tracker
 
     Returns:
@@ -65,237 +55,166 @@ def process_pdf(pdf_file, embed_model: str, max_tokens: int, progress=gr.Progres
     """
     global current_pdf_slug
 
-    if pdf_file is None:
+    if pdf_files is None or (isinstance(pdf_files, list) and len(pdf_files) == 0):
         return (
-            "Please upload a PDF file.",
+            "Please upload at least one PDF file.",
             gr.update(),
             None,
             gr.update(visible=False),
             gr.update(visible=False),
         )
 
-    try:
-        # Debug logging
-        print(f"\n{'='*60}")
-        print(f"DEBUG: Processing PDF upload")
-        print(f"DEBUG: pdf_file type: {type(pdf_file)}")
-        print(f"DEBUG: pdf_file value: {pdf_file}")
+    # Normalize to list
+    if not isinstance(pdf_files, list):
+        pdf_files = [pdf_files]
 
-        # Get filename and create slug
-        # Note: With type="filepath", pdf_file is the filepath string
-        if isinstance(pdf_file, str):
-            pdf_filepath = pdf_file
-            original_filename = Path(pdf_file).name
-        else:
-            # Fallback for other Gradio file types
-            pdf_filepath = pdf_file.name
-            original_filename = Path(pdf_file.name).name
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Processing {len(pdf_files)} PDF(s)")
+    print(f"DEBUG: Embed model: {embed_model}")
+    print(f"DEBUG: Max tokens: {max_tokens}")
+    print(f"DEBUG: Use Gemini: {use_gemini}")
+    print(f"{'='*60}\n")
 
-        print(f"DEBUG: pdf_filepath: {pdf_filepath}")
-        print(f"DEBUG: original_filename: {original_filename}")
+    processed_results = []
+    cached_results = []
+    failed_results = []
+    last_successful_slug = None
 
-        # Create slug from filename
-        pdf_slug = "".join(c if c.isalnum() or c in "-_" else "_" for c in Path(original_filename).stem).lower()
-        print(f"DEBUG: pdf_slug: {pdf_slug}")
+    # Process each PDF
+    for idx, pdf_file in enumerate(pdf_files, 1):
+        try:
+            # Get filepath
+            if isinstance(pdf_file, str):
+                pdf_filepath = pdf_file
+            else:
+                pdf_filepath = pdf_file.name
 
-        # Check if already processed
-        print(f"DEBUG: Checking if PDF already processed...")
-        pdf_info = storage.get_pdf_metadata(pdf_slug)
-        if pdf_info:
-            print(f"DEBUG: PDF already processed, returning cached version")
-            current_pdf_slug = pdf_slug
+            pdf_name = Path(pdf_filepath).name
 
-            status = f"""ℹ️ **PDF already processed!**
+            # Update progress
+            overall_progress = (idx - 1) / len(pdf_files)
+            progress(overall_progress, desc=f"Processing {idx}/{len(pdf_files)}: {pdf_name}")
 
-📄 **Document:** {pdf_info['filename']}
-📊 **Statistics:**
-- Pages: {pdf_info['num_pages']}
-- Sections: {pdf_info['num_sections']}
-- Text chunks: {pdf_info['num_chunks']}
-- Processed: {pdf_info['processed_date'][:10]}
+            print(f"\n[{idx}/{len(pdf_files)}] Processing: {pdf_name}")
 
-🤖 **Ready to answer questions!** Select it from the dropdown and ask below.
-"""
-            # Update dropdown
-            pdf_list = storage.list_pdfs()
-            choices = [(f"{p['filename']} ({p['num_chunks']} chunks)", p['slug']) for p in pdf_list]
+            # Progress callback for individual PDF
+            def pdf_progress(pct: float, desc: str):
+                # Combine overall progress with PDF progress
+                pdf_weight = 1.0 / len(pdf_files)
+                combined_progress = overall_progress + (pct * pdf_weight)
+                progress(combined_progress, desc=f"[{idx}/{len(pdf_files)}] {pdf_name}: {desc}")
 
-            return (
-                status,
-                gr.update(choices=choices, value=pdf_slug),
-                pdf_slug,
-                gr.update(visible=True),
-                gr.update(visible=True),
+            # Run unified ingestion pipeline
+            result = ingest_pdf(
+                pdf_path=Path(pdf_filepath),
+                storage=storage,
+                embed_model=embed_model,
+                max_tokens=max_tokens,
+                use_gemini=use_gemini,
+                gemini_pages="",  # Process all pages if Gemini enabled
+                force_reprocess=False,  # Respect cache in web UI
+                save_to_db=True,
+                save_files=True,
+                output_dir=None,  # Use default
+                progress_callback=pdf_progress,
             )
 
-        # Load from uploaded file first
-        print(f"DEBUG: Loading PDF from: {pdf_filepath}")
-        progress(0.1, desc="Loading PDF...")
-        doc = load_pdf(pdf_filepath)
+            last_successful_slug = result.pdf_slug
+            summary = result.summary()
 
-        # Save to data/input/ for persistence
-        print(f"DEBUG: Saving PDF to data/input/")
-        input_dir = Path("data/input")
-        input_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = input_dir / original_filename
-        if not pdf_path.exists():
-            shutil.copy(pdf_filepath, pdf_path)
-            print(f"DEBUG: Saved PDF to: {pdf_path}")
+            if result.was_cached:
+                cached_results.append(summary)
+                print(f"  ✓ Cached: {pdf_name}")
+            else:
+                processed_results.append(summary)
+                print(f"  ✓ Processed: {pdf_name}")
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"\n{'='*60}")
+            print(f"ERROR: Exception processing {pdf_name}")
+            print(f"ERROR: {error_details}")
+            print(f"{'='*60}\n")
+
+            failed_results.append({
+                'filename': pdf_name,
+                'error': str(e)
+            })
+
+    # Build status message
+    total = len(processed_results) + len(cached_results) + len(failed_results)
+
+    if total == 0:
+        status = "❌ No PDFs were processed."
+    else:
+        status_parts = []
+
+        # Header
+        if len(pdf_files) == 1:
+            if processed_results:
+                status_parts.append("✅ **PDF processed successfully!**\n")
+            elif cached_results:
+                status_parts.append("ℹ️ **PDF already processed!** (loaded from cache)\n")
+            else:
+                status_parts.append("❌ **PDF processing failed!**\n")
         else:
-            print(f"DEBUG: PDF already exists at: {pdf_path}")
+            status_parts.append(f"📦 **Batch Processing Complete: {total} PDF(s)**\n")
 
-        current_pdf_slug = pdf_slug
+        # Summary stats for batch
+        if len(pdf_files) > 1:
+            status_parts.append(f"📊 **Summary:**")
+            status_parts.append(f"- ✅ Newly processed: {len(processed_results)}")
+            status_parts.append(f"- ⊘ Cached (skipped): {len(cached_results)}")
+            status_parts.append(f"- ❌ Failed: {len(failed_results)}\n")
 
-        progress(0.2, desc="Extracting pages...")
-        pages = extract_pages(doc)
+        # Processed PDFs
+        if processed_results:
+            status_parts.append("**✅ Newly Processed:**")
+            for s in processed_results:
+                status_parts.append(f"\n📄 **{s['filename']}**")
+                status_parts.append(f"- Pages: {s['num_pages']}, Chunks: {s['num_chunks']}, Sections: {s['num_sections']}")
+                status_parts.append(f"- Figures: {s['num_figures']}, Tables: {s['num_tables']}")
+                status_parts.append(f"- Cross-refs: {s['num_mentions']} ({s['num_resolved_mentions']} resolved)")
+            status_parts.append("")
 
-        progress(0.3, desc="Extracting table of contents...")
-        toc = extract_toc(doc)
+        # Cached PDFs
+        if cached_results:
+            status_parts.append("**⊘ Cached (Already Processed):**")
+            for s in cached_results:
+                status_parts.append(f"- {s['filename']} ({s['num_chunks']} chunks)")
+            status_parts.append("")
 
-        progress(0.35, desc="Building section tree...")
-        sections = build_section_tree(toc)
+        # Failed PDFs
+        if failed_results:
+            status_parts.append("**❌ Failed:**")
+            for f in failed_results:
+                status_parts.append(f"- {f['filename']}: {f['error']}")
+            status_parts.append("")
 
-        progress(0.4, desc="Chunking text...")
-        chunks = build_chunks(pages, sections, max_tokens=max_tokens)
+        if processed_results or cached_results:
+            status_parts.append("🤖 **Ready to answer questions!** Select a PDF from the dropdown and ask below.")
 
-        progress(0.5, desc="Generating embeddings (this may take a minute)...")
-        embeddings = embed_chunks(chunks, model_name=embed_model)
+        status = "\n".join(status_parts)
 
-        progress(0.7, desc="Building search index...")
-        storage.save_embeddings(pdf_slug, embeddings)
+    # Update dropdown
+    pdf_list = storage.list_pdfs()
+    choices = [(f"{p['filename']} ({p['num_chunks']} chunks)", p['slug']) for p in pdf_list]
 
-        progress(0.75, desc="Indexing figures and tables...")
-        figures, tables = index_figures_tables(pages)
+    # Set current slug to last successful one
+    if last_successful_slug:
+        current_pdf_slug = last_successful_slug
 
-        progress(0.8, desc="Extracting cross-references...")
-        all_mentions = []
-        for chunk in chunks:
-            all_mentions.extend(extract_mentions(chunk))
+    # Show chat UI if at least one PDF was processed successfully
+    show_chat = len(processed_results) + len(cached_results) > 0
 
-        all_mentions = resolve_mentions(
-            all_mentions, sections, figures, tables, n_pages=len(pages)
-        )
-
-        progress(0.85, desc="Building knowledge graph...")
-        graph = build_graph(
-            doc_id="document",
-            pages=pages,
-            sections=sections,
-            chunks=chunks,
-            mentions=all_mentions,
-            figures=figures,
-            tables=tables,
-        )
-
-        progress(0.9, desc="Saving to database...")
-
-        # Register PDF FIRST (required before saving metadata)
-        print(f"DEBUG: Registering PDF in database...")
-        storage.save_pdf_metadata(
-            slug=pdf_slug,
-            filename=original_filename,
-            num_pages=len(pages),
-            num_chunks=len(chunks),
-            num_sections=len(sections),
-            num_figures=len(figures),
-            num_tables=len(tables),
-            metadata={
-                "embedding_model": embed_model,
-                "embedding_dim": int(embeddings.shape[1]),
-            },
-        )
-
-        # Save chunks
-        print(f"DEBUG: Saving chunks to database...")
-        chunks_data = [
-            {"chunk_id": c.id, "section_id": c.section_id, "page": c.page, "text": c.text}
-            for c in chunks
-        ]
-        storage.save_chunks(pdf_slug, chunks_data)
-
-        # Save graph
-        if hasattr(storage, 'save_graph'):
-            print(f"DEBUG: Saving graph to database...")
-            # Convert NetworkX graph to node/edge lists
-            nodes = []
-            for node_id, attrs in graph.nodes(data=True):
-                node_doc = {"node_id": node_id, "type": attrs.get("type", "Unknown"), "label": attrs.get("label", "")}
-                for k, v in attrs.items():
-                    if k not in ["type", "label"] and v is not None:
-                        node_doc[k] = v
-                nodes.append(node_doc)
-
-            edges = []
-            for u, v, attrs in graph.edges(data=True):
-                edge_doc = {"from_id": u, "to_id": v, "type": attrs.get("type", "EDGE")}
-                for k, v in attrs.items():
-                    if k not in ["type"] and v is not None:
-                        edge_doc[k] = v
-                edges.append(edge_doc)
-
-            storage.save_graph(pdf_slug, nodes, edges)
-
-        # Save metadata (AFTER PDF is registered)
-        print(f"DEBUG: Saving metadata to database...")
-        storage.save_metadata(pdf_slug, "sections", sections)
-        storage.save_metadata(pdf_slug, "toc", toc)
-        storage.save_metadata(pdf_slug, "mentions", [
-            {
-                "source_chunk_id": m.source_chunk_id,
-                "kind": m.kind,
-                "raw_text": m.raw_text,
-                "target_hint": m.target_hint,
-                "target_id": m.target_id,
-            }
-            for m in all_mentions
-        ])
-        storage.save_metadata(pdf_slug, "figures", figures)
-        storage.save_metadata(pdf_slug, "tables", tables)
-
-        progress(0.95, desc="Complete...")
-
-        progress(1.0, desc="Complete!")
-
-        status = f"""✅ **PDF processed successfully!**
-
-📄 **Document:** {original_filename}
-📊 **Statistics:**
-- Pages: {len(pages)}
-- Sections: {len(sections)}
-- Text chunks: {len(chunks)}
-- Figures: {len(figures)}
-- Tables: {len(tables)}
-- Cross-references found: {len(all_mentions)}
-
-🤖 **Ready to answer questions!** Select it from the dropdown and ask below.
-"""
-
-        # Update dropdown with all PDFs
-        pdf_list = storage.list_pdfs()
-        choices = [(f"{p['filename']} ({p['num_chunks']} chunks)", p['slug']) for p in pdf_list]
-
-        return (
-            status,
-            gr.update(choices=choices, value=pdf_slug),
-            pdf_slug,
-            gr.update(visible=True),
-            gr.update(visible=True),
-        )
-
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"\n{'='*60}")
-        print(f"ERROR: Exception during PDF processing")
-        print(f"ERROR: {error_details}")
-        print(f"{'='*60}\n")
-        return (
-            f"❌ **Error processing PDF:** {str(e)}\n\nCheck terminal for full traceback.",
-            gr.update(),
-            None,
-            gr.update(visible=False),
-            gr.update(visible=False),
-        )
+    return (
+        status,
+        gr.update(choices=choices, value=last_successful_slug if last_successful_slug else None),
+        last_successful_slug,
+        gr.update(visible=show_chat),
+        gr.update(visible=show_chat),
+    )
 
 
 def chat_response(
@@ -399,6 +318,51 @@ def refresh_pdf_list():
     return load_available_pdfs()
 
 
+def auto_ingest_on_startup():
+    """Auto-ingest all PDFs from data/input/ on app startup."""
+    print("\n" + "=" * 80)
+    print("🔄 AUTO-INGEST: Checking data/input/ for new PDFs...")
+    print("=" * 80)
+
+    # Determine if Gemini should be used by default
+    use_gemini_default = bool(os.getenv("GEMINI_API_KEY"))
+
+    # Progress callback
+    def progress_print(pdf_name: str, status: str):
+        print(f"  [{pdf_name}] {status}")
+
+    try:
+        results = auto_ingest_directory(
+            input_dir=Path("data/input"),
+            storage=storage,
+            embed_model="sentence-transformers/all-MiniLM-L6-v2",
+            max_tokens=500,
+            use_gemini=use_gemini_default,
+            save_to_db=True,
+            save_files=True,
+            progress_callback=progress_print,
+        )
+
+        total = len(results['processed']) + len(results['skipped']) + len(results['failed'])
+
+        if total == 0:
+            print("\n⚠️  No PDFs found in data/input/")
+        else:
+            print(f"\n✓ Auto-ingest complete:")
+            print(f"  - Newly processed: {len(results['processed'])}")
+            print(f"  - Skipped (cached): {len(results['skipped'])}")
+            print(f"  - Failed: {len(results['failed'])}")
+
+        print("=" * 80 + "\n")
+
+    except Exception as e:
+        print(f"\n⚠️  Auto-ingest error: {e}")
+        print("=" * 80 + "\n")
+
+    # Return updated dropdown state
+    return load_available_pdfs()
+
+
 # Build Gradio interface
 with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
     gr.Markdown(
@@ -422,8 +386,9 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
             gr.Markdown("### 📤 Upload New PDF")
 
             pdf_input = gr.File(
-                label="Upload PDF",
+                label="Upload PDF(s)",
                 file_types=[".pdf"],
+                file_count="multiple",
                 type="filepath"
             )
 
@@ -446,6 +411,12 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
                 step=50,
                 label="Max Tokens per Chunk",
                 info="Smaller = more precise, Larger = more context"
+            )
+
+            use_gemini_ingest = gr.Checkbox(
+                label="Use Gemini for Visual Analysis During Ingestion",
+                value=True if os.getenv("GEMINI_API_KEY") else False,
+                info="Extract cross-references from diagrams and images (requires GEMINI_API_KEY)"
             )
 
             process_btn = gr.Button("🚀 Process PDF", variant="primary", size="lg")
@@ -518,7 +489,7 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
     # Event handlers
     process_btn.click(
         fn=process_pdf,
-        inputs=[pdf_input, embed_model, max_tokens],
+        inputs=[pdf_input, embed_model, max_tokens, use_gemini_ingest],
         outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row]
     )
 
@@ -553,9 +524,9 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
         outputs=clear_btn
     )
 
-    # Load available PDFs on startup
+    # Auto-ingest PDFs from data/input/ and load dropdown on startup
     demo.load(
-        fn=load_available_pdfs,
+        fn=auto_ingest_on_startup,
         outputs=pdf_selector
     )
 

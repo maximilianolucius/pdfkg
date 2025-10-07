@@ -1,0 +1,628 @@
+<?xml version='1.0' encoding='utf-8'?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+  <key id="d7" for="edge" attr.name="kind" attr.type="string" />
+  <key id="d6" for="edge" attr.name="type" attr.type="string" />
+  <key id="d5" for="node" attr.name="number" attr.type="string" />
+  <key id="d4" for="node" attr.name="section_id" attr.type="string" />
+  <key id="d3" for="node" attr.name="text" attr.type="string" />
+  <key id="d2" for="node" attr.name="page" attr.type="long" />
+  <key id="d1" for="node" attr.name="label" attr.type="string" />
+  <key id="d0" for="node" attr.name="type" attr.type="string" />
+  <graph edgedefault="directed">
+    <node id="document">
+      <data key="d0">Document</data>
+      <data key="d1">document</data>
+    </node>
+    <node id="page:1">
+      <data key="d0">Page</data>
+      <data key="d1">Page 1</data>
+      <data key="d2">1</data>
+    </node>
+    <node id="page:2">
+      <data key="d0">Page</data>
+      <data key="d1">Page 2</data>
+      <data key="d2">2</data>
+    </node>
+    <node id="page:3">
+      <data key="d0">Page</data>
+      <data key="d1">Page 3</data>
+      <data key="d2">3</data>
+    </node>
+    <node id="page:4">
+      <data key="d0">Page</data>
+      <data key="d1">Page 4</data>
+      <data key="d2">4</data>
+    </node>
+    <node id="08508d89-2a79-472b-90d6-e45eb4b0a65d">
+      <data key="d0">Paragraph</data>
+      <data key="d1">Important information for devices with UL approval...</data>
+      <data key="d3">Important information for devices with UL approval
+Type 8691 REV.2
+Control Head
+Address 
+Bürkert Fluid Control Systems 
+Christian-Bürkert-Str. 13-17 
+D-74653 Ingelfingen 
+Tel. +49 (0)7940 10-91 111 
+E-mail: info@burkert.com 
+International: country.burkert.com
+Manuals on the Internet: country.burkert.com
+© Bürkert Werke GmbH &amp; Co. KG, 2025
+Supplement 2509/00_US-en_60043446 / Original EN
+1	
+Intended use
+Non-intended use of the control head Type 8691 REV.2 
+may be a hazard to people, nearby equipment and the 
+environment. The device is designed to be mounted on pneumatic 
+actuators of process valves for the control of media.
+	
+▶Do not use the device outdoors without protection from the 
+weather.
+	
+▶Use according to the authorized data, operating conditions and 
+conditions of use specified as described in this document.
+	
+▶The device may be used only in conjunction with  
+third-party devices and components recommended and 
+authorized by Bürkert.
+	
+▶In view of the large number of options for use, before instal-
+lation, it is essential to study and if necessary to test whet-
+her the control head is suitable for the actual use planned.
+	
+▶Correct transportation, correct storage and installation and 
+careful use and maintenance are essential for reliable and 
+faultless operation. Explosion hazard! Only those devices are permitted to be installed in a poten-
+tially explosive atmosphere/ hazardous (classified) location 
+that bear the corresponding labeling for the respective area.
+2	 Basic safety instructions
+The operator is responsible for observing the location-
+specific safety regulations, also with reference to the 
+personnel. Risk of injury from high pressure in the equipment/device 
+	
+▶Before working on equipment or device, switch off the 
+pressure and deaerate/drain lines. General hazardous situations:
+To prevent injury, ensure:
+	
+▶That the system cannot be activated unintentionally.
+	
+▶Installation and repair work may be carried out by authori-
+zed technicians only and with the appropriate tools. To prevent damage to property of the device, ensure:
+	
+▶Do not feed any aggressive or flammable media into the 
+pilot air port.
+	
+▶Do not feed any liquids into the pilot air port.
+	
+▶When unscrewing and screwing in the body casing or the 
+transparent cap, do not hold the actuator of the process 
+valve but the connection housing of Type 8691 REV.2.
+	
+▶Do not put any loads on the body (e.g. by placing objects 
+on it or standing on it).
+	
+▶Do not make any external modifications to the device 
+bodies.</data>
+      <data key="d4">root</data>
+      <data key="d2">1</data>
+    </node>
+    <node id="9307a75c-071d-4cb5-8308-9e91ff60ac78">
+      <data key="d0">Paragraph</data>
+      <data key="d1">Do not paint the body parts or screws.
+3	 Operatin...</data>
+      <data key="d3">Do not paint the body parts or screws.
+3	 Operating conditions
+Altitude
+restricted to max. 2000 m above sea 
+level
+Relative air humidity
+max. 90% at 55 °C / 60 °C  
+(non condensing)
+Ambient temperature
+see type label
+Degree of protection
+evaluated by the 
+manufacturer
+IP65/IP67 according to EN 605291) 
+evaluated by UL
+UL Type 4x Rating indoor only1)
+4	 Pneumatic data
+Control medium
+neutral gases, air 
+Quality classes in accordance with 
+DIN ISO 8573-1
+Pressure range
+3…7 bar (43.5...101.5 psi)
+Temperature range
+–10…+50 °C (+14...+122 °F)
+5	 Electrical data
+The device must be supplied by one of the following:
+a) Limited Energy Circuit (LEC) according to UL/ IEC 61010-1
+b) Limited Power Source (LPS) according to UL/ IEC 60950
+c) SELV/ PELV with UL Recognized Overcurrent Protection 
+dimensioned according to UL/ IEC 61010-1 Table 18
+d) NEC Class 2 power source
+Electrical data  IO-Link
+Protection class
+III as per DIN EN 61140 (VDE 0140-1)
+Connections
+Circular plug-in connector M12 x 1, 
+4-pin, Port Class A
+Operating voltage
+18…30 V 
+  
+(according to specification)
+Max. current 
+consumption
+135 mA @18 V (incl. inrush current 
+pilot valve for 200 ms)
+Current consumption  
+input during normal 
+operation  
+110 mA @18 V  
+(after current reduction, pilot valve 
+after 200 ms and 1 end position 
+reached)
+1)  Only if cables, plugs and sockets have been connected correctly and in 
+compliance with the exhaust air concept
+ Electrical data büS
+Protection class
+III as per DIN EN 61140 (VDE 0140-1)
+Connections
+Circular plug-in connector M12 x 1, 
+5-pin
+Operating voltage
+18–30 V 
+ (according to 
+specification)
+Max. current 
+consumption
+120 mA @18 V (incl. inrush current 
+pilot valve for 200 ms)
+Current consumption 
+input during normal 
+operation
+95 mA @18 V 
+(after current reduction, pilot valve 
+after 200 ms and 1 end position 
+reached)
+6	 Installation
+6.1	 Installing devices with integrated pilot air 
+duct (21xx, Element)
+Only for devices without preinstalled process valve. Required attachment kit: ELEMENT Type 21xx
+NOTE
+Damage to the device and the drive when welding welded 
+bodies. Observe the following during installation on process valves 
+with welded body:
+	
+▶Observe the installation instructions for the operating 
+manual of the process valve.
+	
+▶Before installing the device, weld the process valve into 
+the pipe system.
+1. Installing the switch spindle
+Transparent cap
+Pilot air ports 
+(plug-in connectors with collets 
+or threaded bushings)
+Position indicator
+Fig. 1:	
+Installing the switch spindle (1), integrated pilot air duct
+	
+▶Unscrew the transparent cap from the actuator.
+	
+▶Unscrew position indicator from spindle extension.
+	
+▶For variant with hose connector: remove the collets (white 
+sleeves) from the pilot air ports. Spindle extension
+Guide element
+Actuator cover
+Lip seal
+Puck
+Switch spindle
+Max. 5 Nm
+Max. 1 Nm
+O-ring
+Fig. 2:	
+Installing the switch spindle (2), integrated pilot air duct
+NOTE
+Lip seal can be damaged if incorrectly installed. The lip seal is pre-mounted in the guide element and must 
+be "locked into position" in the undercut.
+	
+▶When installing the switch spindle, do not damage the lip 
+seal.
+	
+▶Slide switch spindle through the guide element.</data>
+      <data key="d4">root</data>
+      <data key="d2">1</data>
+    </node>
+    <node id="db1590d3-4a39-473b-ba71-e5c67727ff4d">
+      <data key="d0">Paragraph</data>
+      <data key="d1">NOTE
+Contamination of the lip seal due to screw lo...</data>
+      <data key="d3">NOTE
+Contamination of the lip seal due to screw locking paint.
+	
+▶Do not apply any screw locking paint to the switch 
+spindle.
+	
+▶To secure the switch spindle, apply some screw locking 
+paint (e.g. Loctite 290) in the threading of the spindle 
+extension in the actuator.
+	
+▶Check that the O-ring is in the correct position.
+	
+▶Screw guide element in actuator cover (tightening torque: 
+max. 5 Nm).
+	
+▶Screw switch spindle onto the spindle extension. A slot is 
+provided on the top side (tightening torque: max. 1 Nm).
+	
+▶Push puck onto the switch spindle and lock into position.
+2. Attaching the form seal
+	
+▶Pull the form seal onto the actuator cover (smaller diameter 
+points upwards).
+	
+▶Check that the O-rings are correctly positioned in the pilot 
+air ports. Before installing the device, remove the collets in the 
+pilot air ports. Pilot air ports 
+without collets
+Form seal
+Fig. 3:	
+Attaching the form seal
+3. Installing the device
+NOTE
+Damage or functional outage of the PCB.
+	
+▶Ensure that the puck lies flat in the guide rail.
+	
+▶Align the puck and device so that:  
+1. The puck rests in the guide rail of the device (see Fig. 
+below).  
+2. Find the connection pieces of the device into the pilot air 
+ports of the actuator (see second Fig. below). Guide rail
+Puck
+Fig. 4:	
+Aligning the puck
+	
+▶Push the device without turning it onto the actuator until no 
+gap is visible on the form seal. NOTE
+Damage or malfunction due to ingress of dirt or moisture. To observe the degree of protection IP65 or IP67:
+	
+▶Tighten fastening screws only with a tightening torque of 
+max. 1.5 Nm.
+	
+▶Attach device to the actuator using the two side fastening 
+screws. In doing so, tighten the screws only hand-tight 
+(max. torque: 1.5 Nm). Connection 
+pieces
+Pilot air ports
+2x fastening screws 
+(max. 1.5 Nm)
+Fig. 5:	
+Installation
+ 6.2	Installing devices with external control air 
+duct (20xx, Classic)
+Only for devices without preinstalled process valve. Required attachment kit:  
+Classic Type 20xx for the corresponding variant
+NOTE
+Damage to the device and the drive when welding welded 
+bodies. Observe the following during installation on process valves 
+with welded body:
+	
+▶Observe the installation instructions for the operating 
+manual of the process valve.
+	
+▶Before installing the device, weld the process valve into 
+the pipe system.
+1. Installing switch spindle
+Transparent cap
+Position indicator
+Fig. 6:	
+Installing the switch spindle (1), external pilot air duct
+	
+▶Unscrew the transparent cap from the actuator.
+	
+▶Unscrew the position indicator of the spindle with hex key.</data>
+      <data key="d4">root</data>
+      <data key="d2">1</data>
+    </node>
+    <node id="25b158c6-2ba6-4d5a-8615-99794235835a">
+      <data key="d0">Paragraph</data>
+      <data key="d1">Guide element
+O-ring
+Plastic part
+Puck
+Switch spin...</data>
+      <data key="d3">Guide element
+O-ring
+Plastic part
+Puck
+Switch spindle
+Spindle (actuator)
+Max. 8 Nm
+Actuator cover
+Max. 1 Nm
+Fig. 7:	
+Installing the switch spindle (2), external pilot air duct
+	
+▶Press O-ring down into the actuator cover.
+	
+▶Manually screw the switch spindle (and the slipped over 
+guide element) to the spindle of the actuator with the plas-
+tic part and do not tighten initially.
+	
+▶Screw the guide element into the cover of the actuator with 
+a face pin wrench2) (tightening torque: max. 8 Nm).
+	
+▶Tighten the switch spindle on the spindle of the actuator. A slot is provided on the top side (tightening torque: max. 
+1 Nm).
+	
+▶Push puck onto the switch spindle and lock into position.
+2. Installing the device
+Cover ring
+Fig. 8:	
+Attaching cover ring
+	
+▶Wind cover ring onto actuator cover (only for actuator size 
+ø50 and ø63).
+2)	 pin Ø: 3 mm; pin spacing: 23.5 mm
+NOTE
+Damage or functional outage of the PCB.
+	
+▶Ensure that the puck lies flat in the guide rail.
+	
+▶Align the puck and the device so that the puck rests in the 
+guide rail of the device (see following figure). Guide rail
+Puck
+Fig. 9:	
+Aligning the puck
+	
+▶Press the device all the way down to the actuator and turn 
+it into the required position. Ensure that the pneumatic connections of the device 
+and those of the valve actuator are situated preferably 
+vertically one above the other (see Fig. below). For different positioning, longer hoses may be required 
+than those supplied in the  attachment kit. NOTE
+Damage or malfunction due to ingress of dirt or moisture. To observe the degree of protection IP65 or IP67:
+	
+▶Tighten fastening screws only with a tightening torque of 
+max. 1.5 Nm.
+	
+▶Attach device to the actuator using the two side fastening 
+screws. In doing so, tighten the screws only hand-tight 
+(max. torque: 1.5 Nm).
+3. Pneumatically connecting device and actuator
+Pilot air outlet 2-1
+Pilot air outlet 2-2
+Upper pilot air port
+Lower pilot air port
+Example ∅80, CFA
+Fastening screw
+Fig. 10:	 Pneumatically connecting device and actuator
+	
+▶Screw plug-in hose connector onto device and actuator.
+	
+▶Using the hoses supplied in the attachment kit, make the 
+pneumatic connection between the device and actuator.
+ 7	
+Electrical connection
+7.1	 Connecting the device electrically, IO-Link
+1
+2
+3
+4
+Fig. 11:	 Pin assignment, IO-Link
+Pin
+Designation
+Assignment
+IO-Link mode
+SIO mode
+1
+L +
+24 V DC
+2
+I/Q
+Not assigned
+DI or DO
+3
+L −
+0 V (GND)
+4
+Q/C
+IO-Link
+DI or DO
+Tab. 1:	
+Pin assignment IO-Link
+7.2	 Connecting the device electrically, büS
+1
+2
+3
+4
+5
+Fig. 12:	 Pin assignment, büS
+Pin
+Wire color
+Assignment
+1
+CAN plate/shielding
+CAN plate/shielding
+2
+red
++24 V DC ± 10%, max. 
+residual ripple 10%
+3
+black
+GND / CAN_GND
+4
+white
+CAN_H
+5
+blue
+CAN_L
+Tab. 2:	 Pin assignment büS
+For electrical installation with büS network, note:
+Use a 5-pin round plug and shielded 5-core cable.</data>
+      <data key="d4">root</data>
+      <data key="d2">1</data>
+    </node>
+    <node id="figure:1:p2">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 1</data>
+      <data key="d5">1</data>
+    </node>
+    <node id="figure:2:p2">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 2</data>
+      <data key="d5">2</data>
+    </node>
+    <node id="figure:3:p2">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 3</data>
+      <data key="d5">3</data>
+    </node>
+    <node id="figure:4:p2">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 4</data>
+      <data key="d5">4</data>
+    </node>
+    <node id="figure:5:p2">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 5</data>
+      <data key="d5">5</data>
+    </node>
+    <node id="figure:6:p3">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 6</data>
+      <data key="d5">6</data>
+    </node>
+    <node id="figure:7:p3">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 7</data>
+      <data key="d5">7</data>
+    </node>
+    <node id="figure:8:p3">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 8</data>
+      <data key="d5">8</data>
+    </node>
+    <node id="figure:9:p3">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 9</data>
+      <data key="d5">9</data>
+    </node>
+    <node id="figure:10:p3">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 10</data>
+      <data key="d5">10</data>
+    </node>
+    <node id="figure:11:p4">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 11</data>
+      <data key="d5">11</data>
+    </node>
+    <node id="figure:12:p4">
+      <data key="d0">Figure</data>
+      <data key="d1">Figure 12</data>
+      <data key="d5">12</data>
+    </node>
+    <node id="table:1:p4">
+      <data key="d0">Table</data>
+      <data key="d1">Table 1</data>
+      <data key="d5">1</data>
+    </node>
+    <node id="table:2:p4">
+      <data key="d0">Table</data>
+      <data key="d1">Table 2</data>
+      <data key="d5">2</data>
+    </node>
+    <edge source="document" target="page:1" id="0">
+      <data key="d6">CONTAINS</data>
+      <data key="d7">page</data>
+    </edge>
+    <edge source="document" target="page:2" id="0">
+      <data key="d6">CONTAINS</data>
+      <data key="d7">page</data>
+    </edge>
+    <edge source="document" target="page:3" id="0">
+      <data key="d6">CONTAINS</data>
+      <data key="d7">page</data>
+    </edge>
+    <edge source="document" target="page:4" id="0">
+      <data key="d6">CONTAINS</data>
+      <data key="d7">page</data>
+    </edge>
+    <edge source="page:1" target="08508d89-2a79-472b-90d6-e45eb4b0a65d" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">paragraph</data>
+    </edge>
+    <edge source="page:1" target="9307a75c-071d-4cb5-8308-9e91ff60ac78" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">paragraph</data>
+    </edge>
+    <edge source="page:1" target="db1590d3-4a39-473b-ba71-e5c67727ff4d" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">paragraph</data>
+    </edge>
+    <edge source="page:1" target="25b158c6-2ba6-4d5a-8615-99794235835a" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">paragraph</data>
+    </edge>
+    <edge source="page:2" target="figure:1:p2" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:2" target="figure:2:p2" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:2" target="figure:3:p2" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:2" target="figure:4:p2" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:2" target="figure:5:p2" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:3" target="figure:6:p3" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:3" target="figure:7:p3" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:3" target="figure:8:p3" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:3" target="figure:9:p3" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:3" target="figure:10:p3" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:4" target="figure:11:p4" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:4" target="figure:12:p4" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">figure</data>
+    </edge>
+    <edge source="page:4" target="table:1:p4" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">table</data>
+    </edge>
+    <edge source="page:4" target="table:2:p4" id="0">
+      <data key="d6">LOCATED_ON</data>
+      <data key="d7">table</data>
+    </edge>
+  </graph>
+</graphml>
