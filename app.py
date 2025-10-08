@@ -6,7 +6,23 @@ Usage:
     python app.py
 """
 
+# Fix for macOS multiprocessing segmentation fault
+import multiprocessing
+import sys
+if sys.platform == "darwin":  # macOS
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
 import os
+
+# Fix FAISS threading issues on macOS
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 import shutil
 from pathlib import Path
 from typing import Generator
@@ -218,7 +234,7 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
 
 
 def chat_response(
-    message: str, history: list, selected_pdf: str, use_gemini: bool, top_k: int, embed_model: str
+    message: str, history: list, selected_pdf: str, llm_provider: str, top_k: int, embed_model: str
 ) -> Generator:
     """
     Generate response to user question.
@@ -227,7 +243,7 @@ def chat_response(
         message: User question
         history: Chat history
         selected_pdf: Selected PDF slug
-        use_gemini: Whether to use Gemini for answers
+        llm_provider: LLM provider ("none", "gemini", or "mistral")
         top_k: Number of chunks to retrieve
         embed_model: Embedding model name
 
@@ -238,7 +254,7 @@ def chat_response(
     print(f"DEBUG Q&A: New question received")
     print(f"DEBUG Q&A: Question: {message}")
     print(f"DEBUG Q&A: Selected PDF: {selected_pdf}")
-    print(f"DEBUG Q&A: Use Gemini: {use_gemini}")
+    print(f"DEBUG Q&A: LLM Provider: {llm_provider}")
     print(f"DEBUG Q&A: Top K: {top_k}")
     print(f"DEBUG Q&A: Embed Model: {embed_model}")
 
@@ -256,7 +272,7 @@ def chat_response(
             selected_pdf,  # Pass slug instead of directory
             model_name=embed_model,
             top_k=top_k,
-            use_gemini=use_gemini,
+            llm_provider=llm_provider,
             storage=storage,
         )
         print(f"DEBUG Q&A: answer_question() completed successfully")
@@ -266,7 +282,7 @@ def chat_response(
 
         # Add source references if verbose
         sources = result["sources"][:3]  # Top 3 sources
-        if sources and not use_gemini:  # Gemini mode already includes context
+        if sources and llm_provider == "none":  # LLM modes already include context
             source_refs = "\n\n📚 **Sources:**\n"
             for i, src in enumerate(sources, 1):
                 source_refs += f"{i}. Section {src['section_id']}, Page {src['page']} (score: {src['similarity_score']:.2f})\n"
@@ -416,7 +432,8 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
             use_gemini_ingest = gr.Checkbox(
                 label="Use Gemini for Visual Analysis During Ingestion",
                 value=True if os.getenv("GEMINI_API_KEY") else False,
-                info="Extract cross-references from diagrams and images (requires GEMINI_API_KEY)"
+                info="Extract cross-references from diagrams and images (requires GEMINI_API_KEY)",
+                interactive=True
             )
 
             process_btn = gr.Button("🚀 Process PDF", variant="primary", size="lg")
@@ -437,10 +454,22 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("### 💬 Chat Options")
 
-            use_gemini = gr.Checkbox(
-                label="Use Gemini for Natural Language Answers",
-                value=True if os.getenv("GEMINI_API_KEY") else False,
-                info="Requires GEMINI_API_KEY in .env"
+            # Determine default LLM provider
+            default_llm = "none"
+            if os.getenv("GEMINI_API_KEY"):
+                default_llm = "gemini"
+            elif os.getenv("MISTRAL_API_KEY"):
+                default_llm = "mistral"
+
+            llm_provider = gr.Radio(
+                choices=[
+                    ("No LLM (keyword search only)", "none"),
+                    ("Gemini", "gemini"),
+                    ("Mistral", "mistral"),
+                ],
+                value=default_llm,
+                label="LLM Provider for Answer Generation",
+                info="Choose the AI model to generate natural language answers"
             )
 
             top_k = gr.Slider(
@@ -500,7 +529,7 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
 
     submit_btn.click(
         fn=chat_response,
-        inputs=[msg, chatbot, pdf_selector, use_gemini, top_k, embed_model],
+        inputs=[msg, chatbot, pdf_selector, llm_provider, top_k, embed_model],
         outputs=chatbot
     ).then(
         lambda: "",
@@ -509,7 +538,7 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
 
     msg.submit(
         fn=chat_response,
-        inputs=[msg, chatbot, pdf_selector, use_gemini, top_k, embed_model],
+        inputs=[msg, chatbot, pdf_selector, llm_provider, top_k, embed_model],
         outputs=chatbot
     ).then(
         lambda: "",
@@ -536,12 +565,22 @@ if __name__ == "__main__":
     print("PDF Knowledge Graph Q&A - Gradio Web App")
     print("=" * 80)
 
-    # Check Gemini
+    # Check LLM providers
+    llm_status = []
     if os.getenv("GEMINI_API_KEY"):
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-        print(f"✅ Gemini enabled: {gemini_model}")
+        llm_status.append(f"✅ Gemini enabled: {gemini_model}")
     else:
-        print("⚠️  Gemini disabled: GEMINI_API_KEY not set in .env")
+        llm_status.append("⚠️  Gemini disabled: GEMINI_API_KEY not set in .env")
+
+    if os.getenv("MISTRAL_API_KEY"):
+        mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+        llm_status.append(f"✅ Mistral enabled: {mistral_model}")
+    else:
+        llm_status.append("⚠️  Mistral disabled: MISTRAL_API_KEY not set in .env")
+
+    for status in llm_status:
+        print(status)
 
     print("=" * 80)
     print("\n🚀 Starting web server...\n")

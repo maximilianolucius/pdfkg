@@ -25,6 +25,13 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+try:
+    from mistralai import Mistral
+
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    MISTRAL_AVAILABLE = False
+
 
 def load_artifacts(pdf_slug: str, storage) -> dict[str, Any]:
     """
@@ -226,6 +233,70 @@ Answer:"""
     return response.text
 
 
+def generate_answer_mistral(question: str, context_chunks: list[dict]) -> str:
+    """
+    Generate answer using Mistral AI.
+
+    Args:
+        question: User question.
+        context_chunks: Retrieved chunks with metadata.
+
+    Returns:
+        Generated answer.
+    """
+    if not MISTRAL_AVAILABLE:
+        raise RuntimeError(
+            "mistralai package not installed. Install with: pip install mistralai"
+        )
+
+    api_key = os.getenv("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError("MISTRAL_API_KEY not set in .env")
+
+    # Get model name from environment or use default
+    model_name = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+
+    # Initialize Mistral client
+    client = Mistral(api_key=api_key)
+
+    # Build context
+    context_parts = []
+    for i, chunk in enumerate(context_chunks, 1):
+        context_parts.append(
+            f"[Chunk {i}] (Section: {chunk['section_id']}, Page: {chunk['page']})\n{chunk['text']}"
+        )
+    context = "\n\n".join(context_parts)
+
+    # Build prompt
+    prompt = f"""You are a helpful assistant answering questions about a technical manual.
+
+Question: {question}
+
+Context from the manual:
+{context}
+
+Instructions:
+- Answer the question based ONLY on the provided context
+- Be specific and cite section/page references when possible
+- If the context doesn't contain enough information to answer, say so
+- Keep your answer concise and technical
+
+Answer:"""
+
+    # Generate response
+    response = client.chat.complete(
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+    )
+
+    return response.choices[0].message.content
+
+
 def format_simple_answer(question: str, context_chunks: list[dict]) -> str:
     """
     Format a simple answer without LLM (just show relevant chunks).
@@ -254,7 +325,7 @@ def answer_question(
     pdf_slug: str,
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     top_k: int = 5,
-    use_gemini: bool = False,
+    llm_provider: str = "none",
     storage = None,
 ) -> dict[str, Any]:
     """
@@ -265,18 +336,21 @@ def answer_question(
         pdf_slug: PDF slug identifier.
         model_name: Embedding model name.
         top_k: Number of chunks to retrieve.
-        use_gemini: Whether to use Gemini for answer generation.
+        llm_provider: LLM provider to use ("none", "gemini", or "mistral").
         storage: Storage backend instance (optional, will create if None).
 
     Returns:
         Dict with keys: question, answer, sources, related.
     """
+    import time
+    start_time = time.time()
+
     print(f"\nDEBUG QUERY: ========== answer_question START ==========")
     print(f"DEBUG QUERY: Question: {question}")
     print(f"DEBUG QUERY: PDF slug: {pdf_slug}")
     print(f"DEBUG QUERY: Model: {model_name}")
     print(f"DEBUG QUERY: Top K: {top_k}")
-    print(f"DEBUG QUERY: Use Gemini: {use_gemini}")
+    print(f"DEBUG QUERY: LLM Provider: {llm_provider}")
 
     # Get storage backend if not provided
     if storage is None:
@@ -363,14 +437,59 @@ def answer_question(
 
     # Generate answer
     print(f"DEBUG QUERY: Generating answer...")
-    if use_gemini:
+    llm_model = "none"
+
+    if llm_provider == "gemini":
         print(f"DEBUG QUERY: Using Gemini for answer generation")
         answer = generate_answer_gemini(question, chunks)
+        llm_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    elif llm_provider == "mistral":
+        print(f"DEBUG QUERY: Using Mistral for answer generation")
+        answer = generate_answer_mistral(question, chunks)
+        llm_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
     else:
-        print(f"DEBUG QUERY: Using simple answer format")
+        print(f"DEBUG QUERY: Using simple answer format (no LLM)")
         answer = format_simple_answer(question, chunks)
+        llm_provider = "none"
 
     print(f"DEBUG QUERY: Answer generated successfully")
+
+    # Calculate response time
+    response_time_ms = (time.time() - start_time) * 1000
+    print(f"DEBUG QUERY: Response time: {response_time_ms:.2f}ms")
+
+    # Save Q&A interaction to database (if using ArangoDB storage)
+    if hasattr(storage, 'db_client') and hasattr(storage.db_client, 'save_qa_interaction'):
+        try:
+            print(f"DEBUG QUERY: Saving Q&A interaction to database...")
+            # Prepare sources for storage (limit data size)
+            sources_for_storage = [
+                {
+                    "chunk_id": c.get("chunk_id") or c.get("id"),
+                    "section_id": c.get("section_id"),
+                    "page": c.get("page"),
+                    "similarity_score": c.get("similarity_score"),
+                    "rank": c.get("rank"),
+                }
+                for c in chunks
+            ]
+
+            storage.db_client.save_qa_interaction(
+                question=question,
+                answer=answer,
+                pdf_slug=pdf_slug,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                embed_model=model_name,
+                top_k=top_k,
+                sources=sources_for_storage,
+                related_items=related,
+                response_time_ms=response_time_ms,
+            )
+            print(f"DEBUG QUERY: Q&A interaction saved successfully")
+        except Exception as e:
+            print(f"DEBUG QUERY: Warning - Could not save Q&A interaction: {e}")
+
     print(f"DEBUG QUERY: ========== answer_question END ==========\n")
 
     return {

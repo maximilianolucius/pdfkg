@@ -49,6 +49,7 @@ class ArangoDBClient:
         self.NODES = "nodes"
         self.EDGES = "edges"
         self.CHUNKS = "chunks"
+        self.QA_HISTORY = "qa_history"
 
     def connect(self) -> StandardDatabase:
         """Connect to ArangoDB and create database if needed."""
@@ -104,6 +105,17 @@ class ArangoDBClient:
             # Full-text index on text
             self.db.collection(self.CHUNKS).add_fulltext_index(fields=["text"])
             print(f"Created collection: {self.CHUNKS}")
+
+        # Q&A History collection (document) - for auditing and debugging
+        if not self.db.has_collection(self.QA_HISTORY):
+            self.db.create_collection(self.QA_HISTORY)
+            # Indexes
+            self.db.collection(self.QA_HISTORY).add_hash_index(fields=["pdf_slug"])
+            self.db.collection(self.QA_HISTORY).add_hash_index(fields=["llm_provider"])
+            self.db.collection(self.QA_HISTORY).add_persistent_index(fields=["timestamp"])
+            # Full-text index on question
+            self.db.collection(self.QA_HISTORY).add_fulltext_index(fields=["question"])
+            print(f"Created collection: {self.QA_HISTORY}")
 
     def register_pdf(
         self,
@@ -424,6 +436,98 @@ class ArangoDBClient:
         """
 
         cursor = self.db.aql.execute(aql)
+        return list(cursor)
+
+    def save_qa_interaction(
+        self,
+        question: str,
+        answer: str,
+        pdf_slug: str,
+        llm_provider: str,
+        llm_model: str,
+        embed_model: str,
+        top_k: int,
+        sources: list[dict],
+        related_items: dict,
+        response_time_ms: float,
+        timestamp: str = None,
+    ) -> dict:
+        """
+        Save a Q&A interaction to the history collection for auditing.
+
+        Args:
+            question: User question
+            answer: Generated answer
+            pdf_slug: PDF slug
+            llm_provider: LLM provider ("gemini", "mistral", or "none")
+            llm_model: Specific model used
+            embed_model: Embedding model used
+            top_k: Number of chunks retrieved
+            sources: Retrieved chunks with scores
+            related_items: Related figures/tables/sections
+            response_time_ms: Response time in milliseconds
+            timestamp: ISO timestamp (auto-generated if None)
+
+        Returns:
+            Saved Q&A document
+        """
+        from datetime import datetime
+
+        qa_doc = {
+            "timestamp": timestamp or datetime.now().isoformat(),
+            "question": question,
+            "answer": answer,
+            "pdf_slug": pdf_slug,
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
+            "embed_model": embed_model,
+            "top_k": top_k,
+            "sources": sources,
+            "related_items": related_items,
+            "response_time_ms": response_time_ms,
+        }
+
+        qa_collection = self.db.collection(self.QA_HISTORY)
+        result = qa_collection.insert(qa_doc)
+        qa_doc["_key"] = result["_key"]
+        return qa_doc
+
+    def get_qa_history(
+        self, pdf_slug: str = None, limit: int = 100, llm_provider: str = None
+    ) -> list[dict]:
+        """
+        Get Q&A history with optional filters.
+
+        Args:
+            pdf_slug: Filter by PDF slug (None for all)
+            limit: Maximum results
+            llm_provider: Filter by LLM provider (None for all)
+
+        Returns:
+            List of Q&A documents sorted by timestamp descending
+        """
+        filters = []
+        bind_vars = {"@collection": self.QA_HISTORY, "limit": limit}
+
+        if pdf_slug:
+            filters.append("FILTER qa.pdf_slug == @pdf_slug")
+            bind_vars["pdf_slug"] = pdf_slug
+
+        if llm_provider:
+            filters.append("FILTER qa.llm_provider == @llm_provider")
+            bind_vars["llm_provider"] = llm_provider
+
+        filter_clause = "\n".join(filters) if filters else ""
+
+        query = f"""
+            FOR qa IN @@collection
+            {filter_clause}
+            SORT qa.timestamp DESC
+            LIMIT @limit
+            RETURN qa
+        """
+
+        cursor = self.db.aql.execute(query, bind_vars=bind_vars)
         return list(cursor)
 
     def _ensure_named_graph(self, pdf_slug: str) -> None:

@@ -5,6 +5,7 @@ Embedding and FAISS indexing utilities.
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
+import os
 
 from pdfkg.config import Chunk
 
@@ -15,6 +16,8 @@ _model_cache = {}
 def _get_model(model_name: str) -> SentenceTransformer:
     """Get or create cached model instance."""
     if model_name not in _model_cache:
+        # Disable tokenizer parallelism to avoid fork issues on macOS
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
         _model_cache[model_name] = SentenceTransformer(model_name, device="cpu")
     return _model_cache[model_name]
 
@@ -34,7 +37,13 @@ def embed_chunks(
     """
     model = _get_model(model_name)
     texts = [c.text for c in chunks]
-    embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
+    # Use batch_size=32 and disable multi-process pool to avoid macOS fork issues
+    embeddings = model.encode(
+        texts,
+        convert_to_numpy=True,
+        show_progress_bar=True,
+        batch_size=32
+    )
     # Normalize for cosine similarity via inner product
     embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
     return embeddings.astype(np.float32)

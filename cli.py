@@ -21,10 +21,25 @@ python cli.py --pdf data/input/your.pdf --use-gemini --gemini-pages 1-10,30-40
 python cli.py --embed-model BAAI/bge-small-en-v1.5
 """
 
+# Fix for macOS multiprocessing segmentation fault
+import multiprocessing
+import sys
+if sys.platform == "darwin":  # macOS
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
 import argparse
 import os
+
+# Fix FAISS threading issues on macOS
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 from pathlib import Path
-import sys
 from dotenv import load_dotenv
 
 # Load .env file

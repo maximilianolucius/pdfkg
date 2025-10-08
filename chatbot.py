@@ -3,8 +3,10 @@
 Interactive chatbot for querying the PDF knowledge graph.
 
 Usage:
-    python chatbot.py --out data/out
-    python chatbot.py --out data/out --use-gemini
+    python chatbot.py
+    python chatbot.py --llm-provider gemini
+    python chatbot.py --llm-provider mistral
+    python chatbot.py --pdf my-manual.pdf --llm-provider gemini
 """
 
 import argparse
@@ -81,9 +83,16 @@ def main():
         "--top-k", type=int, default=5, help="Number of chunks to retrieve"
     )
     parser.add_argument(
+        "--llm-provider",
+        type=str,
+        choices=["none", "gemini", "mistral"],
+        default="none",
+        help="LLM provider to use for answer generation (none, gemini, or mistral)",
+    )
+    parser.add_argument(
         "--use-gemini",
         action="store_true",
-        help="Use Gemini to generate natural language answers",
+        help="[DEPRECATED] Use --llm-provider gemini instead",
     )
     parser.add_argument(
         "--verbose", action="store_true", help="Show detailed sources and related nodes"
@@ -93,6 +102,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Handle deprecated --use-gemini flag
+    if args.use_gemini:
+        print("Warning: --use-gemini is deprecated. Use --llm-provider gemini instead.")
+        args.llm_provider = "gemini"
 
     # Initialize storage backend
     storage = get_storage_backend()
@@ -142,16 +156,24 @@ def main():
                 print("\nCancelled.", file=sys.stderr)
                 sys.exit(1)
 
-    # Check Gemini availability
-    gemini_status = "disabled"
-    if args.use_gemini:
+    # Check LLM provider availability
+    llm_status = "none"
+    if args.llm_provider == "gemini":
         if os.getenv("GEMINI_API_KEY"):
             gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-            gemini_status = f"enabled ({gemini_model})"
+            llm_status = f"Gemini ({gemini_model})"
         else:
-            gemini_status = "disabled (GEMINI_API_KEY not set)"
-            print("Warning: --use-gemini specified but GEMINI_API_KEY not found in environment")
+            print("Warning: Gemini selected but GEMINI_API_KEY not found in environment")
             print("Set it in .env file or export GEMINI_API_KEY=your_key")
+            llm_status = "Gemini (disabled - no API key)"
+    elif args.llm_provider == "mistral":
+        if os.getenv("MISTRAL_API_KEY"):
+            mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+            llm_status = f"Mistral ({mistral_model})"
+        else:
+            print("Warning: Mistral selected but MISTRAL_API_KEY not found in environment")
+            print("Set it in .env file or export MISTRAL_API_KEY=your_key")
+            llm_status = "Mistral (disabled - no API key)"
 
     # Get PDF info
     pdf_info = storage.get_pdf_metadata(selected_pdf)
@@ -163,7 +185,7 @@ def main():
     print(f"Pages: {pdf_info['num_pages']}, Chunks: {pdf_info['num_chunks']}")
     print(f"Storage: {os.getenv('STORAGE_BACKEND', 'arango').upper()}")
     print(f"Embedding Model: {args.embed_model}")
-    print(f"Gemini: {gemini_status}")
+    print(f"LLM Provider: {llm_status}")
     print("=" * 80)
 
     # Single question mode
@@ -173,7 +195,7 @@ def main():
             selected_pdf,
             model_name=args.embed_model,
             top_k=args.top_k,
-            use_gemini=args.use_gemini,
+            llm_provider=args.llm_provider,
             storage=storage,
         )
         print_answer(result, verbose=args.verbose)
@@ -196,7 +218,7 @@ def main():
                 selected_pdf,
                 model_name=args.embed_model,
                 top_k=args.top_k,
-                use_gemini=args.use_gemini,
+                llm_provider=args.llm_provider,
                 storage=storage,
             )
             print_answer(result, verbose=args.verbose)
