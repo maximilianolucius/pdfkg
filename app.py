@@ -55,7 +55,7 @@ except Exception as e:
 current_pdf_slug = None
 
 
-def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, progress=gr.Progress()) -> tuple:
+def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, force_reprocess: bool, progress=gr.Progress()) -> tuple:
     """
     Process uploaded PDF(s) and build knowledge graph.
 
@@ -64,6 +64,7 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
         embed_model: Embedding model name
         max_tokens: Max tokens per chunk
         use_gemini: Enable Gemini visual analysis
+        force_reprocess: Force reprocessing even if PDF is cached
         progress: Gradio progress tracker
 
     Returns:
@@ -89,6 +90,7 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
     print(f"DEBUG: Embed model: {embed_model}")
     print(f"DEBUG: Max tokens: {max_tokens}")
     print(f"DEBUG: Use Gemini: {use_gemini}")
+    print(f"DEBUG: Force reprocess: {force_reprocess}")
     print(f"{'='*60}\n")
 
     processed_results = []
@@ -128,7 +130,7 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
                 max_tokens=max_tokens,
                 use_gemini=use_gemini,
                 gemini_pages="",  # Process all pages if Gemini enabled
-                force_reprocess=False,  # Respect cache in web UI
+                force_reprocess=force_reprocess,
                 save_to_db=True,
                 save_files=True,
                 output_dir=None,  # Use default
@@ -436,6 +438,13 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
                 interactive=True
             )
 
+            force_reprocess = gr.Checkbox(
+                label="Force Reprocess",
+                value=False,
+                info="Reprocess PDF even if already cached in database",
+                interactive=True
+            )
+
             process_btn = gr.Button("🚀 Process PDF", variant="primary", size="lg")
 
             status_output = gr.Markdown(label="Status")
@@ -518,7 +527,7 @@ with gr.Blocks(title="PDF Knowledge Graph Q&A", theme=gr.themes.Soft()) as demo:
     # Event handlers
     process_btn.click(
         fn=process_pdf,
-        inputs=[pdf_input, embed_model, max_tokens, use_gemini_ingest],
+        inputs=[pdf_input, embed_model, max_tokens, use_gemini_ingest, force_reprocess],
         outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row]
     )
 
