@@ -147,6 +147,81 @@ def retrieve_chunks(
     return results
 
 
+def retrieve_chunks_global(
+    question: str,
+    model_name: str,
+    top_k: int,
+    storage,
+) -> list[dict]:
+    """
+    Retrieve most relevant chunks across ALL PDFs using Milvus global search.
+
+    Args:
+        question: User question.
+        model_name: Embedding model name.
+        top_k: Number of chunks to retrieve.
+        storage: Storage backend with Milvus client.
+
+    Returns:
+        List of chunk dicts with similarity scores and PDF info.
+    """
+    print(f"DEBUG QUERY: Retrieving chunks GLOBALLY across all PDFs")
+    print(f"DEBUG QUERY: Question: '{question}'")
+    print(f"DEBUG QUERY: Using model: {model_name}, top_k: {top_k}")
+
+    # Check if Milvus is available
+    if not hasattr(storage, 'milvus_client') or storage.milvus_client is None:
+        raise RuntimeError("Milvus client not available for global search")
+
+    # Encode question
+    print(f"DEBUG QUERY: Encoding question...")
+    query_embedding = encode_query(question, model_name)
+    print(f"DEBUG QUERY: Query embedding shape: {query_embedding.shape}")
+
+    # Perform global search in Milvus
+    print(f"DEBUG QUERY: Performing global search in Milvus...")
+    search_results = storage.milvus_client.search_global(
+        query_embedding=query_embedding,
+        top_k=top_k
+    )
+    print(f"DEBUG QUERY: Global search complete. Found {len(search_results)} results")
+
+    # Fetch chunks from ArangoDB
+    results = []
+    for i, result in enumerate(search_results):
+        pdf_slug = result['pdf_slug']
+        chunk_index = result['chunk_index']
+        distance = result['distance']
+
+        print(f"DEBUG QUERY:   Result {i+1}: pdf={pdf_slug}, chunk_idx={chunk_index}, score={distance:.3f}")
+
+        # Get chunk from ArangoDB
+        try:
+            chunks = storage.db_client.get_chunks(pdf_slug)
+            if chunk_index < len(chunks):
+                chunk = chunks[chunk_index].copy()
+                chunk["similarity_score"] = distance
+                chunk["rank"] = i + 1
+                chunk["pdf_slug"] = pdf_slug  # Add PDF slug to chunk
+
+                # Get PDF metadata for display
+                pdf_info = storage.db_client.get_pdf(pdf_slug)
+                if pdf_info:
+                    chunk["pdf_filename"] = pdf_info.get("filename", pdf_slug)
+                else:
+                    chunk["pdf_filename"] = pdf_slug
+
+                results.append(chunk)
+            else:
+                print(f"DEBUG QUERY:   Warning: chunk_index {chunk_index} out of range for PDF {pdf_slug}")
+        except Exception as e:
+            print(f"DEBUG QUERY:   Error fetching chunk from {pdf_slug}: {e}")
+            continue
+
+    print(f"DEBUG QUERY: Retrieved {len(results)} chunks from {len(set(r['pdf_slug'] for r in results))} PDFs")
+    return results
+
+
 def find_related_nodes(
     chunk_ids: list[str], graph: nx.MultiDiGraph, max_depth: int = 1
 ) -> dict[str, list[str]]:
@@ -204,11 +279,12 @@ def generate_answer_gemini(question: str, context_chunks: list[dict]) -> str:
     # Get model name from environment or use default
     model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-    # Build context
+    # Build context (include PDF filename if available for global search)
     context_parts = []
     for i, chunk in enumerate(context_chunks, 1):
+        pdf_info = f" PDF: {chunk['pdf_filename']}" if 'pdf_filename' in chunk else ""
         context_parts.append(
-            f"[Chunk {i}] (Section: {chunk['section_id']}, Page: {chunk['page']})\n{chunk['text']}"
+            f"[Chunk {i}]{pdf_info} (Section: {chunk['section_id']}, Page: {chunk['page']})\n{chunk['text']}"
         )
     context = "\n\n".join(context_parts)
 
@@ -259,11 +335,12 @@ def generate_answer_mistral(question: str, context_chunks: list[dict]) -> str:
     # Initialize Mistral client
     client = Mistral(api_key=api_key)
 
-    # Build context
+    # Build context (include PDF filename if available for global search)
     context_parts = []
     for i, chunk in enumerate(context_chunks, 1):
+        pdf_info = f" PDF: {chunk['pdf_filename']}" if 'pdf_filename' in chunk else ""
         context_parts.append(
-            f"[Chunk {i}] (Section: {chunk['section_id']}, Page: {chunk['page']})\n{chunk['text']}"
+            f"[Chunk {i}]{pdf_info} (Section: {chunk['section_id']}, Page: {chunk['page']})\n{chunk['text']}"
         )
     context = "\n\n".join(context_parts)
 
@@ -312,8 +389,9 @@ def format_simple_answer(question: str, context_chunks: list[dict]) -> str:
     lines.append("Relevant information from the manual:\n")
 
     for i, chunk in enumerate(context_chunks, 1):
+        pdf_info = f" [PDF: {chunk['pdf_filename']}]" if 'pdf_filename' in chunk else ""
         lines.append(
-            f"\n[{i}] Section {chunk['section_id']}, Page {chunk['page']} (similarity: {chunk['similarity_score']:.3f})"
+            f"\n[{i}]{pdf_info} Section {chunk['section_id']}, Page {chunk['page']} (similarity: {chunk['similarity_score']:.3f})"
         )
         lines.append(f"{chunk['text'][:500]}{'...' if len(chunk['text']) > 500 else ''}\n")
 
@@ -322,7 +400,7 @@ def format_simple_answer(question: str, context_chunks: list[dict]) -> str:
 
 def answer_question(
     question: str,
-    pdf_slug: str,
+    pdf_slug: str = None,
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     top_k: int = 5,
     llm_provider: str = "none",
@@ -333,7 +411,7 @@ def answer_question(
 
     Args:
         question: User question.
-        pdf_slug: PDF slug identifier.
+        pdf_slug: PDF slug identifier. If None, searches across ALL PDFs (global search).
         model_name: Embedding model name.
         top_k: Number of chunks to retrieve.
         llm_provider: LLM provider to use ("none", "gemini", or "mistral").
@@ -360,73 +438,94 @@ def answer_question(
     else:
         print(f"DEBUG QUERY: Using provided storage backend: {type(storage).__name__}")
 
-    stored_model = None
-    stored_dim = None
-    pdf_info = None
-    try:
-        pdf_info = storage.get_pdf_metadata(pdf_slug)
-        if pdf_info:
-            print("DEBUG QUERY: Loaded PDF metadata for embedding lookup")
-    except Exception as exc:
-        print(f"DEBUG QUERY: Failed to load PDF metadata: {exc}")
+    # Check if this is a global search (all PDFs) or single PDF search
+    is_global_search = pdf_slug is None
 
-    if pdf_info:
-        metadata = pdf_info.get("metadata") or {}
-        if not isinstance(metadata, dict):
-            metadata = {}
+    if is_global_search:
+        print(f"DEBUG QUERY: GLOBAL SEARCH MODE - Searching across ALL PDFs")
 
-        stored_model = metadata.get("embedding_model") or pdf_info.get("embedding_model")
-        stored_dim = metadata.get("embedding_dim") or pdf_info.get("embedding_dim")
+        # Use default embedding model for global search
+        # TODO: Could auto-detect from first PDF or use env variable
+        print(f"DEBUG QUERY: Using embedding model: {model_name}")
 
-        if stored_model:
-            print(f"DEBUG QUERY: Detected stored embedding model: {stored_model}")
-            if stored_model != model_name:
-                print(
-                    "DEBUG QUERY: Overriding requested embedding model with stored model to "
-                    "match FAISS index"
-                )
-                model_name = stored_model
-        else:
-            print("DEBUG QUERY: No stored embedding model found in metadata")
+        # Retrieve chunks globally using Milvus
+        print(f"DEBUG QUERY: Retrieving relevant chunks globally...")
+        chunks = retrieve_chunks_global(question, model_name, top_k, storage)
 
-        if stored_dim:
-            print(f"DEBUG QUERY: Stored embedding dimension: {stored_dim}")
+        # Create empty artifacts dict (no single PDF artifacts for global search)
+        artifacts = {"graph": nx.MultiDiGraph()}
+
     else:
-        print("DEBUG QUERY: PDF metadata not available; using requested embedding model")
+        print(f"DEBUG QUERY: SINGLE PDF SEARCH MODE - Searching in PDF: {pdf_slug}")
 
-    # Dimension to model mapping (common models)
-    DIM_TO_MODEL = {
-        384: "sentence-transformers/all-MiniLM-L6-v2",
-        768: "sentence-transformers/all-mpnet-base-v2",
-        1024: "BAAI/bge-large-en-v1.5",
-    }
+        # Original single-PDF logic
+        stored_model = None
+        stored_dim = None
+        pdf_info = None
+        try:
+            pdf_info = storage.get_pdf_metadata(pdf_slug)
+            if pdf_info:
+                print("DEBUG QUERY: Loaded PDF metadata for embedding lookup")
+        except Exception as exc:
+            print(f"DEBUG QUERY: Failed to load PDF metadata: {exc}")
 
-    # Load artifacts
-    print(f"DEBUG QUERY: Loading artifacts...")
-    artifacts = load_artifacts(pdf_slug, storage)
+        if pdf_info:
+            metadata = pdf_info.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
 
-    index_dim = getattr(artifacts.get("index", None), "d", None)
-    if stored_dim and index_dim and stored_dim != index_dim:
-        print(
-            f"DEBUG QUERY: Stored embedding dimension ({stored_dim}) does not match FAISS index "
-            f"dimension ({index_dim}). Using index dimension for validation."
-        )
-        stored_dim = index_dim
-    elif not stored_dim and index_dim:
-        print(f"DEBUG QUERY: Using FAISS index dimension {index_dim} for validation")
-        stored_dim = index_dim
+            stored_model = metadata.get("embedding_model") or pdf_info.get("embedding_model")
+            stored_dim = metadata.get("embedding_dim") or pdf_info.get("embedding_dim")
 
-    # If no model was stored but we have a dimension, auto-select model
-    if not stored_model and stored_dim and stored_dim in DIM_TO_MODEL:
-        auto_model = DIM_TO_MODEL[stored_dim]
-        print(f"DEBUG QUERY: No stored model found, auto-selecting based on dimension {stored_dim}: {auto_model}")
-        if auto_model != model_name:
-            print(f"DEBUG QUERY: Overriding requested model '{model_name}' with auto-detected '{auto_model}'")
-            model_name = auto_model
+            if stored_model:
+                print(f"DEBUG QUERY: Detected stored embedding model: {stored_model}")
+                if stored_model != model_name:
+                    print(
+                        "DEBUG QUERY: Overriding requested embedding model with stored model to "
+                        "match FAISS index"
+                    )
+                    model_name = stored_model
+            else:
+                print("DEBUG QUERY: No stored embedding model found in metadata")
 
-    # Retrieve relevant chunks
-    print(f"DEBUG QUERY: Retrieving relevant chunks...")
-    chunks = retrieve_chunks(question, artifacts, model_name, top_k)
+            if stored_dim:
+                print(f"DEBUG QUERY: Stored embedding dimension: {stored_dim}")
+        else:
+            print("DEBUG QUERY: PDF metadata not available; using requested embedding model")
+
+        # Dimension to model mapping (common models)
+        DIM_TO_MODEL = {
+            384: "sentence-transformers/all-MiniLM-L6-v2",
+            768: "sentence-transformers/all-mpnet-base-v2",
+            1024: "BAAI/bge-large-en-v1.5",
+        }
+
+        # Load artifacts
+        print(f"DEBUG QUERY: Loading artifacts...")
+        artifacts = load_artifacts(pdf_slug, storage)
+
+        index_dim = getattr(artifacts.get("index", None), "d", None)
+        if stored_dim and index_dim and stored_dim != index_dim:
+            print(
+                f"DEBUG QUERY: Stored embedding dimension ({stored_dim}) does not match FAISS index "
+                f"dimension ({index_dim}). Using index dimension for validation."
+            )
+            stored_dim = index_dim
+        elif not stored_dim and index_dim:
+            print(f"DEBUG QUERY: Using FAISS index dimension {index_dim} for validation")
+            stored_dim = index_dim
+
+        # If no model was stored but we have a dimension, auto-select model
+        if not stored_model and stored_dim and stored_dim in DIM_TO_MODEL:
+            auto_model = DIM_TO_MODEL[stored_dim]
+            print(f"DEBUG QUERY: No stored model found, auto-selecting based on dimension {stored_dim}: {auto_model}")
+            if auto_model != model_name:
+                print(f"DEBUG QUERY: Overriding requested model '{model_name}' with auto-detected '{auto_model}'")
+                model_name = auto_model
+
+        # Retrieve relevant chunks
+        print(f"DEBUG QUERY: Retrieving relevant chunks...")
+        chunks = retrieve_chunks(question, artifacts, model_name, top_k)
 
     # Find related nodes
     print(f"DEBUG QUERY: Finding related nodes...")

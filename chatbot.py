@@ -123,32 +123,57 @@ def main():
 
     # Select PDF
     if args.pdf:
-        # Try to find PDF by slug or filename
-        selected_pdf = None
-        for pdf in pdf_list:
-            if pdf['slug'] == args.pdf or pdf['filename'] == args.pdf:
-                selected_pdf = pdf['slug']
-                break
-        if not selected_pdf:
-            print(f"Error: PDF not found: {args.pdf}", file=sys.stderr)
-            print(f"Available PDFs:", file=sys.stderr)
+        # Check for special "all" keyword
+        if args.pdf.lower() in ['all', '__all__']:
+            selected_pdf = None  # None means search all PDFs
+            selected_pdf_name = "ALL PDFs"
+        else:
+            # Try to find PDF by slug or filename
+            selected_pdf = None
             for pdf in pdf_list:
-                print(f"  - {pdf['filename']} (slug: {pdf['slug']})", file=sys.stderr)
-            sys.exit(1)
+                if pdf['slug'] == args.pdf or pdf['filename'] == args.pdf:
+                    selected_pdf = pdf['slug']
+                    selected_pdf_name = pdf['filename']
+                    break
+            if selected_pdf is None and args.pdf.lower() not in ['all', '__all__']:
+                print(f"Error: PDF not found: {args.pdf}", file=sys.stderr)
+                print(f"Available PDFs:", file=sys.stderr)
+                for pdf in pdf_list:
+                    print(f"  - {pdf['filename']} (slug: {pdf['slug']})", file=sys.stderr)
+                print(f"  - all (search across all PDFs)", file=sys.stderr)
+                sys.exit(1)
     else:
         # Show list and prompt
         print("Available PDFs:")
+        print(f"  0. ** ALL PDFs ** (search across all documents)")
         for i, pdf in enumerate(pdf_list, 1):
             print(f"  {i}. {pdf['filename']} ({pdf['num_chunks']} chunks, {pdf['num_pages']} pages)")
 
         if len(pdf_list) == 1:
-            selected_pdf = pdf_list[0]['slug']
-            print(f"\nUsing: {pdf_list[0]['filename']}")
+            # Still show option to search all or single PDF
+            try:
+                choice = int(input("\nSelect PDF number (0 for ALL): "))
+                if choice == 0:
+                    selected_pdf = None
+                    selected_pdf_name = "ALL PDFs"
+                elif choice == 1:
+                    selected_pdf = pdf_list[0]['slug']
+                    selected_pdf_name = pdf_list[0]['filename']
+                else:
+                    print("Invalid choice.", file=sys.stderr)
+                    sys.exit(1)
+            except (ValueError, KeyboardInterrupt):
+                print("\nCancelled.", file=sys.stderr)
+                sys.exit(1)
         else:
             try:
-                choice = int(input("\nSelect PDF number: ")) - 1
-                if 0 <= choice < len(pdf_list):
-                    selected_pdf = pdf_list[choice]['slug']
+                choice = int(input("\nSelect PDF number (0 for ALL): "))
+                if choice == 0:
+                    selected_pdf = None
+                    selected_pdf_name = "ALL PDFs"
+                elif 1 <= choice <= len(pdf_list):
+                    selected_pdf = pdf_list[choice - 1]['slug']
+                    selected_pdf_name = pdf_list[choice - 1]['filename']
                 else:
                     print("Invalid choice.", file=sys.stderr)
                     sys.exit(1)

@@ -371,7 +371,9 @@ def ingest_pdf(
     # Step 9: Build FAISS index
     progress(0.6, "Building search index...")
     if storage and save_to_db:
-        storage.save_embeddings(pdf_slug, embeddings)
+        # Extract chunk IDs for Milvus
+        chunk_ids = [c.id for c in chunks]
+        storage.save_embeddings(pdf_slug, embeddings, chunk_ids=chunk_ids)
     else:
         # Save to file
         index = build_faiss_index(embeddings)

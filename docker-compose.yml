@@ -16,6 +16,23 @@ services:
       - arangod
       - --server.endpoint=tcp://0.0.0.0:8529
 
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: pdfkg-milvus
+    security_opt:
+      - seccomp:unconfined
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    restart: unless-stopped
+    environment:
+      - ETCD_USE_EMBED=true
+      - COMMON_STORAGETYPE=local
+    command: milvus run standalone
+
 volumes:
   arangodb_data:
   arangodb_apps:
+  milvus_data:

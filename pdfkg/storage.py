@@ -15,6 +15,79 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+class MilvusIndexWrapper:
+    """
+    Wrapper around Milvus client to provide FAISS-like search interface.
+
+    This allows query.py to use Milvus transparently without code changes.
+    """
+
+    def __init__(self, milvus_client, pdf_slug: str):
+        """
+        Initialize wrapper.
+
+        Args:
+            milvus_client: MilvusClient instance
+            pdf_slug: PDF identifier
+        """
+        self.milvus_client = milvus_client
+        self.pdf_slug = pdf_slug
+        self._embeddings = None
+        self._chunk_ids = None
+        self._loaded = False
+
+    def _ensure_loaded(self):
+        """Lazy load embeddings from Milvus."""
+        if not self._loaded:
+            self._embeddings, self._chunk_ids = self.milvus_client.load_embeddings(self.pdf_slug)
+            self._loaded = True
+
+    @property
+    def d(self) -> int:
+        """Get embedding dimension (FAISS-like interface)."""
+        self._ensure_loaded()
+        return self._embeddings.shape[1]
+
+    @property
+    def ntotal(self) -> int:
+        """Get total number of vectors (FAISS-like interface)."""
+        self._ensure_loaded()
+        return self._embeddings.shape[0]
+
+    def search(self, query_embedding: np.ndarray, k: int):
+        """
+        Search for k nearest neighbors (FAISS-like interface).
+
+        Args:
+            query_embedding: Query vector of shape (1, dim) or (dim,)
+            k: Number of results
+
+        Returns:
+            Tuple of (distances, indices) arrays matching FAISS format
+        """
+        # Use Milvus search
+        distances, indices = self.milvus_client.search(
+            pdf_slug=self.pdf_slug,
+            query_embedding=query_embedding,
+            top_k=k
+        )
+
+        # Return in FAISS format: (distances, indices) with shape (1, k)
+        return distances.reshape(1, -1), indices.reshape(1, -1)
+
+    def reconstruct_n(self, start: int, n: int, output: np.ndarray):
+        """
+        Reconstruct vectors (FAISS-like interface).
+
+        Args:
+            start: Starting index
+            n: Number of vectors to reconstruct
+            output: Output array to fill
+        """
+        self._ensure_loaded()
+        output[:] = self._embeddings[start:start + n]
+
+
 class StorageBackend:
     """Base class for storage backends."""
 
@@ -61,16 +134,31 @@ class StorageBackend:
 
 
 class ArangoStorage(StorageBackend):
-    """ArangoDB storage backend."""
+    """ArangoDB storage backend with Milvus for vector embeddings."""
 
-    def __init__(self, base_dir: Path = Path("data")):
-        from pdfkg.db import ArangoDBClient
+    def __init__(self, base_dir: Path = Path("data"), use_milvus: bool = True):
+        from pdfkg.db import ArangoDBClient, MilvusClient
 
         self.db_client = ArangoDBClient()
         # Note: connection happens in get_storage_backend()
-        # Keep FAISS indexes in filesystem for now
-        self.faiss_dir = base_dir / "faiss_indexes"
-        self.faiss_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use Milvus for embeddings if available, otherwise fallback to FAISS
+        self.use_milvus = use_milvus
+        self.milvus_client = None
+
+        if self.use_milvus:
+            try:
+                self.milvus_client = MilvusClient()
+                print("✅ Milvus client initialized for vector storage")
+            except Exception as e:
+                print(f"⚠️  Milvus initialization failed: {e}")
+                print("⚠️  Falling back to FAISS for embeddings")
+                self.use_milvus = False
+
+        # Fallback: Keep FAISS indexes in filesystem if Milvus is not available
+        if not self.use_milvus:
+            self.faiss_dir = base_dir / "faiss_indexes"
+            self.faiss_dir.mkdir(parents=True, exist_ok=True)
 
     def save_pdf_metadata(self, slug: str, **kwargs) -> None:
         self.db_client.register_pdf(slug=slug, **kwargs)
@@ -90,14 +178,43 @@ class ArangoStorage(StorageBackend):
     def get_chunks(self, slug: str) -> list[dict]:
         return self.db_client.get_chunks(slug)
 
-    def save_embeddings(self, slug: str, embeddings: np.ndarray) -> None:
-        # Save FAISS index to filesystem
-        index = faiss.IndexFlatIP(embeddings.shape[1])
-        index.add(embeddings)
-        faiss.write_index(index, str(self.faiss_dir / f"{slug}.faiss"))
+    def save_embeddings(self, slug: str, embeddings: np.ndarray, chunk_ids: list = None) -> None:
+        """Save embeddings to Milvus or FAISS."""
+        if self.use_milvus and self.milvus_client:
+            # Save to Milvus
+            try:
+                self.milvus_client.save_embeddings(slug, embeddings, chunk_ids)
+            except Exception as e:
+                print(f"⚠️  Milvus save failed: {e}, falling back to FAISS")
+                # Fallback to FAISS
+                if not hasattr(self, 'faiss_dir'):
+                    self.faiss_dir = Path("data") / "faiss_indexes"
+                    self.faiss_dir.mkdir(parents=True, exist_ok=True)
+                index = faiss.IndexFlatIP(embeddings.shape[1])
+                index.add(embeddings)
+                faiss.write_index(index, str(self.faiss_dir / f"{slug}.faiss"))
+        else:
+            # Save FAISS index to filesystem
+            index = faiss.IndexFlatIP(embeddings.shape[1])
+            index.add(embeddings)
+            faiss.write_index(index, str(self.faiss_dir / f"{slug}.faiss"))
 
-    def load_embeddings(self, slug: str) -> faiss.Index:
-        return faiss.read_index(str(self.faiss_dir / f"{slug}.faiss"))
+    def load_embeddings(self, slug: str):
+        """Load embeddings from Milvus or FAISS (returns Milvus-compatible interface)."""
+        if self.use_milvus and self.milvus_client:
+            # Load from Milvus - return a wrapper that provides FAISS-like interface
+            try:
+                return MilvusIndexWrapper(self.milvus_client, slug)
+            except Exception as e:
+                print(f"⚠️  Milvus load failed: {e}, falling back to FAISS")
+                # Fallback to FAISS if available
+                if hasattr(self, 'faiss_dir'):
+                    faiss_path = self.faiss_dir / f"{slug}.faiss"
+                    if faiss_path.exists():
+                        return faiss.read_index(str(faiss_path))
+                raise
+        else:
+            return faiss.read_index(str(self.faiss_dir / f"{slug}.faiss"))
 
     def save_metadata(self, slug: str, key: str, data: Any) -> None:
         self.db_client.save_metadata(slug, key, data)
@@ -195,12 +312,23 @@ class FileStorage(StorageBackend):
 def get_storage_backend() -> StorageBackend:
     """Get configured storage backend."""
     storage_type = os.getenv("STORAGE_BACKEND", "arango").lower()
+    use_milvus = os.getenv("USE_MILVUS", "true").lower() in ("true", "1", "yes")
 
     if storage_type == "arango":
         try:
-            storage = ArangoStorage()
-            # Test connection
+            storage = ArangoStorage(use_milvus=use_milvus)
+            # Test ArangoDB connection
             storage.db_client.connect()
+
+            # Test Milvus connection if enabled
+            if use_milvus and storage.milvus_client:
+                try:
+                    storage.milvus_client.connect()
+                except Exception as e:
+                    print(f"⚠️  Milvus connection failed: {e}")
+                    print(f"⚠️  Will use FAISS for embeddings instead")
+                    storage.use_milvus = False
+
             return storage
         except Exception as e:
             print(f"⚠️  ArangoDB connection failed: {e}")

@@ -70,6 +70,9 @@ pdfminer.six==20250506
 pdfplumber==0.11.7
 pillow==11.3.0
 pluggy==1.6.0
+pymilvus==2.4.3
+python-Levenshtein==0.26.0
+fuzzywuzzy==0.18.0
 proto-plus==1.26.1
 protobuf==5.29.5
 pyarrow==21.0.0

@@ -51,6 +51,15 @@ class ArangoDBClient:
         self.CHUNKS = "chunks"
         self.QA_HISTORY = "qa_history"
 
+        # Cross-document relationship collections
+        self.ENTITIES = "entities"
+        self.ENTITY_MENTIONS = "entity_mentions"
+        self.SEMANTIC_LINKS = "semantic_links"
+        self.CROSS_DOC_REFS = "cross_doc_refs"
+        self.VERSION_RELATIONS = "version_relations"
+        self.TOPICS = "topics"
+        self.TOPIC_ASSIGNMENTS = "topic_assignments"
+
     def connect(self) -> StandardDatabase:
         """Connect to ArangoDB and create database if needed."""
         # Connect to _system database first
@@ -116,6 +125,63 @@ class ArangoDBClient:
             # Full-text index on question
             self.db.collection(self.QA_HISTORY).add_fulltext_index(fields=["question"])
             print(f"Created collection: {self.QA_HISTORY}")
+
+        # === Cross-document relationship collections ===
+
+        # Entities collection (document) - shared entities across PDFs
+        if not self.db.has_collection(self.ENTITIES):
+            self.db.create_collection(self.ENTITIES)
+            # Indexes
+            self.db.collection(self.ENTITIES).add_hash_index(fields=["canonical_name"], unique=False)
+            self.db.collection(self.ENTITIES).add_hash_index(fields=["entity_type"])
+            self.db.collection(self.ENTITIES).add_fulltext_index(fields=["canonical_name"])
+            print(f"Created collection: {self.ENTITIES}")
+
+        # Entity mentions collection (edge) - chunk -> entity
+        if not self.db.has_collection(self.ENTITY_MENTIONS):
+            self.db.create_collection(self.ENTITY_MENTIONS, edge=True)
+            # Indexes
+            self.db.collection(self.ENTITY_MENTIONS).add_hash_index(fields=["pdf_slug"])
+            print(f"Created collection: {self.ENTITY_MENTIONS}")
+
+        # Semantic links collection (edge) - chunk -> chunk semantic similarity
+        if not self.db.has_collection(self.SEMANTIC_LINKS):
+            self.db.create_collection(self.SEMANTIC_LINKS, edge=True)
+            # Indexes
+            self.db.collection(self.SEMANTIC_LINKS).add_hash_index(fields=["source_pdf"])
+            self.db.collection(self.SEMANTIC_LINKS).add_hash_index(fields=["target_pdf"])
+            self.db.collection(self.SEMANTIC_LINKS).add_persistent_index(fields=["similarity"])
+            print(f"Created collection: {self.SEMANTIC_LINKS}")
+
+        # Cross-document references collection (edge) - chunk -> pdf
+        if not self.db.has_collection(self.CROSS_DOC_REFS):
+            self.db.create_collection(self.CROSS_DOC_REFS, edge=True)
+            # Indexes
+            self.db.collection(self.CROSS_DOC_REFS).add_hash_index(fields=["source_pdf"])
+            self.db.collection(self.CROSS_DOC_REFS).add_hash_index(fields=["target_pdf"])
+            print(f"Created collection: {self.CROSS_DOC_REFS}")
+
+        # Version relations collection (edge) - pdf -> pdf version relationship
+        if not self.db.has_collection(self.VERSION_RELATIONS):
+            self.db.create_collection(self.VERSION_RELATIONS, edge=True)
+            # Indexes
+            self.db.collection(self.VERSION_RELATIONS).add_hash_index(fields=["relationship_type"])
+            print(f"Created collection: {self.VERSION_RELATIONS}")
+
+        # Topics collection (document) - document clusters/topics
+        if not self.db.has_collection(self.TOPICS):
+            self.db.create_collection(self.TOPICS)
+            # Indexes
+            self.db.collection(self.TOPICS).add_hash_index(fields=["topic_id"], unique=True)
+            print(f"Created collection: {self.TOPICS}")
+
+        # Topic assignments collection (edge) - pdf -> topic
+        if not self.db.has_collection(self.TOPIC_ASSIGNMENTS):
+            self.db.create_collection(self.TOPIC_ASSIGNMENTS, edge=True)
+            # Indexes
+            self.db.collection(self.TOPIC_ASSIGNMENTS).add_hash_index(fields=["topic_id"])
+            self.db.collection(self.TOPIC_ASSIGNMENTS).add_persistent_index(fields=["probability"])
+            print(f"Created collection: {self.TOPIC_ASSIGNMENTS}")
 
     def register_pdf(
         self,
@@ -352,10 +418,36 @@ class ArangoDBClient:
         Save arbitrary metadata for a PDF.
 
         Args:
-            pdf_slug: PDF slug
+            pdf_slug: PDF slug (use '__global__' for cross-document metadata)
             key: Metadata key (e.g., 'sections', 'toc', 'mentions')
             data: Data to save
         """
+        # Handle special __global__ key for cross-document metadata
+        if pdf_slug == "__global__":
+            pdfs_collection = self.db.collection(self.PDFS)
+            # Check if __global__ document exists
+            if not pdfs_collection.has("__global__"):
+                # Create it
+                pdfs_collection.insert({
+                    "_key": "__global__",
+                    "slug": "__global__",
+                    "filename": "__global__",
+                    "processed_date": datetime.now().isoformat(),
+                    "num_pages": 0,
+                    "num_chunks": 0,
+                    "num_sections": 0,
+                    "num_figures": 0,
+                    "num_tables": 0,
+                    "metadata": {}
+                })
+
+            # Get the document
+            pdf = pdfs_collection.get("__global__")
+            pdf["metadata"][key] = data
+            pdfs_collection.update({"_key": "__global__", "metadata": pdf["metadata"]})
+            return
+
+        # Regular PDF metadata
         pdf = self.get_pdf(pdf_slug)
         if not pdf:
             raise ValueError(f"PDF not found: {pdf_slug}")
@@ -368,12 +460,21 @@ class ArangoDBClient:
         Get metadata for a PDF.
 
         Args:
-            pdf_slug: PDF slug
+            pdf_slug: PDF slug (use '__global__' for cross-document metadata)
             key: Metadata key
 
         Returns:
             Metadata value or None
         """
+        # Handle special __global__ key for cross-document metadata
+        if pdf_slug == "__global__":
+            pdfs_collection = self.db.collection(self.PDFS)
+            if not pdfs_collection.has("__global__"):
+                return None
+            pdf = pdfs_collection.get("__global__")
+            return pdf.get("metadata", {}).get(key)
+
+        # Regular PDF metadata
         pdf = self.get_pdf(pdf_slug)
         if not pdf:
             return None
