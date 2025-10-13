@@ -22,6 +22,16 @@ import os
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 
+
+def _format_unique_examples(items: List[str], limit: int) -> str:
+    """Return a comma-separated preview of unique values in original order."""
+    if not items:
+        return "None"
+    unique_items = [item for item in dict.fromkeys(items) if item]
+    if not unique_items:
+        return "None"
+    return ", ".join(unique_items[:limit])
+
 # LLM imports
 try:
     import google.generativeai as genai
@@ -257,10 +267,10 @@ Context from documents:
 {context}
 
 Entities found:
-- Manufacturers: {', '.join(set(manufacturers)[:5]) if manufacturers else 'None'}
-- Products: {', '.join(set(products)[:5]) if products else 'None'}
-- Serial numbers: {', '.join(set(serials)[:3]) if serials else 'None'}
-- Years: {', '.join(set(years)[:3]) if years else 'None'}
+- Manufacturers: {_format_unique_examples(manufacturers, 5)}
+- Products: {_format_unique_examples(products, 5)}
+- Serial numbers: {_format_unique_examples(serials, 3)}
+- Years: {_format_unique_examples(years, 3)}
 
 Extract and return ONLY valid JSON in this exact format:
 {{
@@ -667,8 +677,8 @@ Only include confirmed information.
             return []
 
         # Encode query
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        from pdfkg.embeds import get_sentence_transformer
+        model = get_sentence_transformer("sentence-transformers/all-MiniLM-L6-v2")
         query_embedding = model.encode([query])[0]
 
         # Global search

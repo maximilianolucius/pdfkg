@@ -132,6 +132,10 @@ class StorageBackend:
             'tables': self.get_metadata(slug, 'tables') or {},
         }
 
+    def get_toc(self, slug: str) -> list[dict]:
+        """Fetch table of contents entries for a PDF."""
+        return self.get_metadata(slug, 'toc') or []
+
 
 class ArangoStorage(StorageBackend):
     """ArangoDB storage backend with Milvus for vector embeddings."""

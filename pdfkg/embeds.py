@@ -2,24 +2,26 @@
 Embedding and FAISS indexing utilities.
 """
 
-import numpy as np
-from sentence_transformers import SentenceTransformer
-import faiss
 import os
+
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
 
 from pdfkg.config import Chunk
 
 # Model cache to prevent repeated loading (fixes macOS semaphore leak)
-_model_cache = {}
+_model_cache: dict[tuple[str, str], SentenceTransformer] = {}
 
 
-def _get_model(model_name: str) -> SentenceTransformer:
-    """Get or create cached model instance."""
-    if model_name not in _model_cache:
-        # Disable tokenizer parallelism to avoid fork issues on macOS
+def get_sentence_transformer(model_name: str, device: str = "cpu") -> SentenceTransformer:
+    """Get or create cached sentence-transformer instance pinned to a device."""
+    cache_key = (model_name, device)
+    if cache_key not in _model_cache:
+        # Disable tokenizer parallelism to avoid fork issues on macOS / forked workers
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        _model_cache[model_name] = SentenceTransformer(model_name, device="cpu")
-    return _model_cache[model_name]
+        _model_cache[cache_key] = SentenceTransformer(model_name, device=device)
+    return _model_cache[cache_key]
 
 
 def embed_chunks(
@@ -35,7 +37,7 @@ def embed_chunks(
     Returns:
         Numpy array of shape (n_chunks, dim) with normalized embeddings.
     """
-    model = _get_model(model_name)
+    model = get_sentence_transformer(model_name)
     texts = [c.text for c in chunks]
     # Use batch_size=32 and disable multi-process pool to avoid macOS fork issues
     embeddings = model.encode(
@@ -76,7 +78,7 @@ def encode_query(text: str, model_name: str) -> np.ndarray:
     Returns:
         Normalized embedding vector.
     """
-    model = _get_model(model_name)
+    model = get_sentence_transformer(model_name)
     embedding = model.encode([text], convert_to_numpy=True)
     embedding = embedding / np.linalg.norm(embedding, axis=1, keepdims=True)
     return embedding.astype(np.float32)

@@ -438,8 +438,8 @@ Return ONLY valid JSON with any relevant data found.
             return []
 
         # Encode query
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        from pdfkg.embeds import get_sentence_transformer
+        model = get_sentence_transformer("sentence-transformers/all-MiniLM-L6-v2")
         query_embedding = model.encode([query])[0]
 
         # Global search
