@@ -183,6 +183,18 @@ class ArangoDBClient:
             self.db.collection(self.TOPIC_ASSIGNMENTS).add_persistent_index(fields=["probability"])
             print(f"Created collection: {self.TOPIC_ASSIGNMENTS}")
 
+    def reset_database(self) -> None:
+        """Drop and recreate the pdfkg database and its collections."""
+        sys_db = self.client.db("_system", username=self.username, password=self.password)
+
+        if sys_db.has_database(self.db_name):
+            sys_db.delete_database(self.db_name)
+            print(f"🗑️  Dropped database: {self.db_name}")
+
+        # Reset local handle and recreate schema
+        self.db = None
+        self.connect()
+
     def register_pdf(
         self,
         slug: str,

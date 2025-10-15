@@ -80,6 +80,7 @@ class MilvusClient:
         if self._connected:
             connections.disconnect(alias="default")
             self._connected = False
+            self.collection = None
 
     def _create_collection(self, dimension: int) -> Collection:
         """
@@ -152,6 +153,21 @@ class MilvusClient:
                     f"Collection '{self.collection_name}' does not exist and no dimension provided"
                 )
             return self._create_collection(dimension)
+
+    def reset_collection(self, dimension: Optional[int] = None, recreate: bool = True) -> None:
+        """Drop pdfkg collection from Milvus and optionally recreate an empty one."""
+        if not self._connected:
+            self.connect()
+
+        if utility.has_collection(self.collection_name):
+            utility.drop_collection(self.collection_name)
+            print(f"🗑️  Dropped Milvus collection '{self.collection_name}'")
+
+        self.collection = None
+
+        if recreate:
+            target_dim = dimension or int(os.getenv("DEFAULT_EMBED_DIM", "384"))
+            self.collection = self._create_collection(target_dim)
 
     def save_embeddings(
         self,

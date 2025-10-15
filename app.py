@@ -348,6 +348,120 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
     )
 
 
+def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
+    """Wipe project artifacts and rebuild empty ArangoDB/Milvus state."""
+    global current_pdf_slug
+
+    status_lines = ["### ♻️ Project Reset", ""]
+
+    # 1. Clear local output directory
+    progress(0.1, desc="Clearing data/output/")
+    output_dir = Path("data/output")
+    try:
+        if output_dir.exists():
+            for item in output_dir.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            status_lines.append("- ✅ Cleared `data/output/`")
+            system_logger.log("Cleared data/output/", "INFO")
+        else:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            status_lines.append("- ℹ️ Created empty `data/output/`")
+            system_logger.log("Created data/output/ directory", "INFO")
+    except Exception as exc:
+        error_msg = f"Failed to clear data/output/: {exc}"
+        status_lines.append(f"- ❌ {error_msg}")
+        system_logger.log(error_msg, "ERROR")
+
+    # 2. Reset ArangoDB database
+    progress(0.4, desc="Resetting ArangoDB")
+    arango_reset_ok = False
+    if hasattr(storage, "db_client"):
+        try:
+            storage.db_client.reset_database()
+            arango_reset_ok = True
+            status_lines.append(f"- ✅ Reset ArangoDB database `{storage.db_client.db_name}`")
+            system_logger.log(f"Reset ArangoDB database {storage.db_client.db_name}", "INFO")
+        except Exception as exc:
+            error_msg = f"Failed to reset ArangoDB: {exc}"
+            status_lines.append(f"- ❌ {error_msg}")
+            system_logger.log(error_msg, "ERROR")
+    else:
+        status_lines.append("- ℹ️ No ArangoDB backend detected; skipped")
+        system_logger.log("Reset skipped: storage backend lacks ArangoDB client", "WARNING")
+
+    # 3. Reset Milvus collection
+    progress(0.7, desc="Resetting Milvus")
+    if hasattr(storage, "milvus_client") and storage.milvus_client:
+        try:
+            default_dim = os.getenv("DEFAULT_EMBED_DIM")
+            dimension = int(default_dim) if default_dim else None
+            storage.milvus_client.reset_collection(dimension=dimension)
+            status_lines.append(f"- ✅ Reset Milvus collection `{storage.milvus_client.collection_name}`")
+            system_logger.log(f"Reset Milvus collection {storage.milvus_client.collection_name}", "INFO")
+        except Exception as exc:
+            error_msg = f"Failed to reset Milvus: {exc}"
+            status_lines.append(f"- ❌ {error_msg}")
+            system_logger.log(error_msg, "ERROR")
+    else:
+        status_lines.append("- ℹ️ No Milvus client configured; skipped")
+        system_logger.log("Reset skipped: Milvus client unavailable", "WARNING")
+
+    # 4. Re-ingest PDFs from data/input
+    progress(0.85, desc="Reprocessing data/input/")
+    ingest_processed = ingest_cached = ingest_failed = 0
+    ingest_errors = []
+    try:
+        use_gemini_default = bool(os.getenv("GEMINI_API_KEY"))
+        ingest_results = auto_ingest_directory(
+            input_dir=Path("data/input"),
+            storage=storage,
+            embed_model="sentence-transformers/all-MiniLM-L6-v2",
+            max_tokens=500,
+            use_gemini=use_gemini_default,
+            save_to_db=True,
+            save_files=True,
+        )
+        ingest_processed = len(ingest_results.get('processed', []))
+        ingest_cached = len(ingest_results.get('skipped', []))
+        ingest_failed = len(ingest_results.get('failed', []))
+
+        status_lines.append("- ✅ Reprocessed PDFs from `data/input/`")
+        status_lines.append(f"  • Processed: {ingest_processed}")
+        status_lines.append(f"  • Cached: {ingest_cached}")
+        status_lines.append(f"  • Failed: {ingest_failed}")
+
+        system_logger.log("Reprocessed data/input/ after reset", "INFO")
+    except Exception as exc:
+        ingest_errors.append(str(exc))
+        status_lines.append(f"- ❌ Failed to reprocess data/input/: {exc}")
+        system_logger.log(f"Failed to reprocess data/input/: {exc}", "ERROR")
+
+    progress(1.0, desc="Reset complete")
+
+    pdf_list = storage.list_pdfs()
+    selected_slug = pdf_list[0]['slug'] if pdf_list else None
+    current_pdf_slug = selected_slug
+
+    dropdown_update = load_available_pdfs()
+
+    has_pdfs = bool(pdf_list)
+    chatbot_update = gr.update(value=[], visible=has_pdfs)
+    chat_row_update = gr.update(visible=has_pdfs)
+
+    status_message = "\n".join(status_lines)
+
+    return (
+        status_message,
+        dropdown_update,
+        selected_slug,
+        chatbot_update,
+        chat_row_update,
+    )
+
+
 def chat_response(
     message: str, history: list, selected_pdf: str, llm_provider: str, top_k: int, embed_model: str
 ) -> Generator:
@@ -1076,17 +1190,15 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
     gr.Markdown("# 🏭 PDFKG - PDF Knowledge Graph & AAS System")
 
     with gr.Tabs() as tabs:
-        # ======================
-        # TAB 1: Q&A Interface
-        # ======================
-        with gr.Tab("📚 PDF Q&A", id="tab_qa"):
-            gr.Markdown("## Upload technical PDF manuals and ask questions about them!")
+        # =========================
+        # TAB 1: PDF Ingestion
+        # =========================
+        with gr.Tab("📥 PDF Ingestion", id="tab_ingest"):
+            gr.Markdown("## Upload technical PDF manuals and build the knowledge graph")
 
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### ⚙️ Configuration")
-
-                    gr.Markdown("#### 📤 Upload New PDF")
 
                     pdf_input = gr.File(
                         label="Upload PDF(s)",
@@ -1132,9 +1244,33 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
 
                     process_btn = gr.Button("🚀 Process PDF", variant="primary", size="lg")
 
-                    status_output = gr.Markdown(label="Status")
+                with gr.Column(scale=2):
+                    gr.Markdown("### 📊 Processing Status")
+                    status_output = gr.Markdown(
+                        value="Upload PDF(s) and click *Process PDF* to populate the knowledge graph.",
+                        label="Status"
+                    )
 
-                    gr.Markdown("#### 📚 Select PDF to Query")
+                    reset_btn = gr.Button(
+                        "♻️ Reset Project Data",
+                        variant="stop",
+                        size="md"
+                    )
+
+                    gr.Markdown(
+                        "⚠️ **Dangerous:** Clears `data/output/` and rebuilds the pdfkg database in ArangoDB and Milvus.",
+                        elem_id="reset-warning"
+                    )
+
+        # =========================
+        # TAB 2: Q&A Interface
+        # =========================
+        with gr.Tab("📚 PDF Q&A", id="tab_qa"):
+            gr.Markdown("## Ask questions against processed manuals")
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 📚 Select PDF to Query")
 
                     with gr.Row():
                         pdf_selector = gr.Dropdown(
@@ -1146,7 +1282,7 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                         )
                         refresh_btn = gr.Button("🔄", scale=1, size="sm")
 
-                    gr.Markdown("#### 💬 Chat Options")
+                    gr.Markdown("### 💬 Chat Options")
 
                     # Determine default LLM provider
                     default_llm = "none"
@@ -1208,7 +1344,7 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                     )
 
         # =============================
-        # TAB 2: AASX File Generation
+        # TAB 3: AASX File Generation
         # =============================
         with gr.Tab("🏭 Generate AASX", id="tab_aasx"):
             gr.Markdown(
@@ -1263,7 +1399,7 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                     )
 
         # =======================
-        # TAB 3: System Logs
+        # TAB 4: System Logs
         # =======================
         with gr.Tab("📋 System Logs", id="tab_logs"):
             gr.Markdown(
@@ -1290,15 +1426,23 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
 
             logs_refresh_timer = gr.Timer(value=5.0, render=False)
 
-    # ============================
-    # EVENT HANDLERS - Tab 1 (Q&A)
-    # ============================
+    # ================================
+    # EVENT HANDLERS - Tab 1 (Ingestion)
+    # ================================
     process_btn.click(
         fn=process_pdf,
         inputs=[pdf_input, embed_model, max_tokens, use_gemini_ingest, force_reprocess],
         outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row]
     )
 
+    reset_btn.click(
+        fn=reset_project_data,
+        outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row]
+    )
+
+    # ============================
+    # EVENT HANDLERS - Tab 2 (Q&A)
+    # ============================
     refresh_btn.click(
         fn=refresh_pdf_list,
         outputs=pdf_selector
@@ -1329,9 +1473,9 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
         outputs=clear_btn
     )
 
-    # ===============================
-    # EVENT HANDLERS - Tab 2 (AASX)
-    # ===============================
+    # ============================
+    # EVENT HANDLERS - Tab 3 (AASX)
+    # ============================
     def generate_and_show_download(llm_provider, progress=gr.Progress()):
         status_msg, file_path = generate_aasx_file(llm_provider, progress)
         if file_path:
@@ -1345,9 +1489,9 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
         outputs=[aasx_status, download_file]
     )
 
-    # ================================
-    # EVENT HANDLERS - Tab 3 (Logs)
-    # ================================
+    # ============================
+    # EVENT HANDLERS - Tab 4 (Logs)
+    # ============================
     refresh_logs_btn.click(
         fn=get_system_logs,
         outputs=logs_display
