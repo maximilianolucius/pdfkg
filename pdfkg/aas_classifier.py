@@ -18,6 +18,9 @@ import json
 import os
 from typing import Dict, List, Optional
 
+from pdfkg import llm_stats
+from pdfkg.submodel_templates import get_template, list_submodel_templates
+
 # LLM imports
 try:
     import google.generativeai as genai
@@ -33,48 +36,28 @@ except ImportError:
 
 
 # AAS Submodel definitions
-AAS_SUBMODELS = {
-    "DigitalNameplate": {
-        "description": "Basic identification information",
-        "keywords": ["serial number", "manufacturer", "product designation", "model number", "year of construction", "nameplate", "identification"],
-        "typical_content": "Manufacturer name, product designation, serial numbers, manufacturing year, product codes"
-    },
-    "TechnicalData": {
-        "description": "Technical specifications and parameters",
-        "keywords": ["specifications", "technical data", "voltage", "current", "power", "dimensions", "weight", "IP rating", "temperature", "pressure", "performance"],
-        "typical_content": "Electrical properties, mechanical properties, dimensions, ratings, performance characteristics"
-    },
-    "Documentation": {
-        "description": "References to technical documents and files",
-        "keywords": ["manual", "datasheet", "drawing", "diagram", "schematic", "CAD", "curve", "documentation"],
-        "typical_content": "User manuals, datasheets, CAD files, wiring diagrams, characteristic curves"
-    },
-    "HandoverDocumentation": {
-        "description": "Certificates, warranties, and compliance documents",
-        "keywords": ["certificate", "certification", "compliance", "warranty", "CE", "UL", "ATEX", "declaration of conformity", "approval"],
-        "typical_content": "CE certificates, safety certifications, warranty documents, declarations of conformity"
-    },
-    "MaintenanceRecord": {
-        "description": "Maintenance schedules and procedures",
-        "keywords": ["maintenance", "service", "inspection", "cleaning", "replacement", "spare parts", "preventive maintenance", "troubleshooting"],
-        "typical_content": "Maintenance schedules, service intervals, spare parts lists, troubleshooting guides"
-    },
-    "OperationalData": {
-        "description": "Operational parameters and settings",
-        "keywords": ["operation", "operating", "settings", "parameters", "configuration", "startup", "shutdown", "commissioning"],
-        "typical_content": "Operating conditions, parameter settings, startup procedures, operating modes"
-    },
-    "BillOfMaterials": {
-        "description": "Component lists and part numbers",
-        "keywords": ["component", "part number", "article number", "bill of materials", "BOM", "parts list", "accessories", "options"],
-        "typical_content": "Component lists, part numbers, article numbers, accessories, optional equipment"
-    },
-    "CarbonFootprint": {
-        "description": "Environmental and lifecycle data",
-        "keywords": ["environmental", "carbon", "CO2", "energy consumption", "lifecycle", "sustainability", "recycling", "disposal", "eco"],
-        "typical_content": "Carbon footprint data, energy efficiency, environmental impact, disposal information"
-    }
-}
+
+
+def _flatten_template_fields(schema, prefix='') -> List[str]:
+    fields: List[str] = []
+    if isinstance(schema, dict):
+        for key, value in schema.items():
+            new_prefix = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                fields.extend(_flatten_template_fields(value, new_prefix))
+            elif isinstance(value, list):
+                if value and isinstance(value[0], dict):
+                    fields.extend(_flatten_template_fields(value[0], new_prefix))
+                else:
+                    fields.append(new_prefix)
+            else:
+                fields.append(new_prefix)
+    elif isinstance(schema, list):
+        if schema and isinstance(schema[0], dict):
+            fields.extend(_flatten_template_fields(schema[0], prefix))
+        else:
+            fields.append(prefix)
+    return fields
 
 
 class AASClassifier:
@@ -117,6 +100,8 @@ class AASClassifier:
 
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}. Use 'gemini' or 'mistral'")
+
+        self.submodel_keys = list_submodel_templates()
 
     def classify_pdf(self, pdf_slug: str) -> Dict:
         """
@@ -252,16 +237,21 @@ class AASClassifier:
                 text_preview = chunk['text'][:200].replace('\n', ' ')
                 sample_text += f"  - {text_preview}...\n"
 
-        # Build submodel descriptions
-        submodel_desc = "AAS Submodels:\n"
-        for i, (submodel, info) in enumerate(AAS_SUBMODELS.items(), 1):
-            submodel_desc += f"{i}. {submodel}\n"
-            submodel_desc += f"   Description: {info['description']}\n"
-            submodel_desc += f"   Keywords: {', '.join(info['keywords'][:5])}\n\n"
+                submodel_desc = "AAS Submodels:\n"
+        for i, key in enumerate(self.submodel_keys, 1):
+            template = get_template(key)
+            fields = _flatten_template_fields(template.schema)
+            preview = ', '.join(fields[:8])
+            if len(fields) > 8:
+                preview += ', ...'
+            submodel_desc += f"{i}. {template.display_name} (key: {key})\n"
+            submodel_desc += f"   Template fields: {preview}\n\n"
+
+        allowed_keys = ', '.join(self.submodel_keys)
 
         prompt = f"""You are an expert in Asset Administration Shell (AAS) v5.0 classification.
 
-Analyze this PDF document and classify it to relevant AAS submodels.
+Analyze this PDF document and decide which submodel templates apply.
 
 === DOCUMENT INFORMATION ===
 Filename: {pdf_info.get('filename', 'Unknown')}
@@ -274,28 +264,23 @@ Sections: {pdf_info.get('num_sections', 0)}
 
 {sample_text}
 
-=== AAS SUBMODELS ===
+=== AVAILABLE SUBMODELS ===
 {submodel_desc}
 
 === TASK ===
-Based on the document's filename, table of contents, entities, and sample content:
-
-1. Identify which AAS submodels this PDF is relevant for
-2. Assign a confidence score (0.0 to 1.0) for each relevant submodel
-3. Provide brief reasoning for your classification
-
-Respond ONLY with valid JSON in this exact format:
+Using the information above, determine which submodel templates (by key) have sufficient information in this document.
+Return JSON using this format and only the keys listed above:
 {{
-  "submodels": ["SubmodelName1", "SubmodelName2"],
+  "submodels": ["DigitalNameplate", "TechnicalData"],
   "confidence_scores": {{
-    "SubmodelName1": 0.95,
-    "SubmodelName2": 0.78
+    "DigitalNameplate": 0.95,
+    "TechnicalData": 0.78
   }},
-  "reasoning": "Brief explanation of why these submodels were selected"
+  "reasoning": "Brief explanation referencing the document context"
 }}
 
+Valid submodel keys: {allowed_keys}.
 Only include submodels with confidence >= 0.5.
-Use exact submodel names from the list above.
 """
 
         return prompt
@@ -305,6 +290,7 @@ Use exact submodel names from the list above.
 
         if self.llm_provider == "gemini":
             response = self.llm_client.generate_content(prompt)
+            llm_stats.record_call(self.llm_provider, 'classification', 'global')
             return response.text
 
         elif self.llm_provider == "mistral":
@@ -312,6 +298,7 @@ Use exact submodel names from the list above.
                 model=self.mistral_model,
                 messages=[{"role": "user", "content": prompt}]
             )
+            llm_stats.record_call(self.llm_provider, 'classification', 'global')
             return response.choices[0].message.content
 
     def _parse_llm_response(self, response_text: str, pdf_slug: str, filename: str) -> Dict:
@@ -330,6 +317,10 @@ Use exact submodel names from the list above.
             # Validate structure
             if "submodels" not in result or "confidence_scores" not in result:
                 raise ValueError("Missing required fields in LLM response")
+
+            filtered_submodels = [key for key in result.get('submodels', []) if key in self.submodel_keys]
+            result['submodels'] = filtered_submodels
+            result['confidence_scores'] = {k: v for k, v in result.get('confidence_scores', {}).items() if k in self.submodel_keys}
 
             # Add metadata
             result["pdf_slug"] = pdf_slug

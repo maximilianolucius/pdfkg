@@ -17,6 +17,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
+from pdfkg import llm_stats
+
 # LLM imports
 try:
     import google.generativeai as genai
@@ -88,7 +90,7 @@ class AASXMLGenerator:
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}")
 
-    def generate_xml(self, output_path: Optional[Path] = None) -> str:
+    def generate_xml(self, output_path: Optional[Path] = None, data: Optional[Dict[str, Any]] = None) -> str:
         """
         Generate complete AAS XML file.
 
@@ -102,20 +104,19 @@ class AASXMLGenerator:
         print("AAS XML GENERATION - Phase 4")
         print("=" * 80)
 
-        # Load validated data from Phase 3
-        validated_data = self.storage.db_client.get_metadata('__global__', 'aas_validated_data')
-        if not validated_data:
-            # Fallback to extracted data if validation was skipped
-            validated_data = self.storage.db_client.get_metadata('__global__', 'aas_extracted_data')
+        if data is None:
+            validated_data = self.storage.db_client.get_metadata('__global__', 'aas_validated_data')
+            if not validated_data:
+                validated_data = self.storage.db_client.get_metadata('__global__', 'aas_extracted_data')
+            data = validated_data
 
-        if not validated_data:
-            print("\n❌ No validated data found. Run Phase 3 first (--validate-aas)")
+        if not data:
+            print("\n❌ No data available for XML generation. Provide data or run previous phases.")
             return ""
 
-        print(f"\n📚 Generating XML for {len(validated_data)} submodels")
+        print(f"\n📚 Generating XML for {len(data)} submodels")
 
-        # Build XML structure
-        xml_string = self._build_xml(validated_data)
+        xml_string = self._build_xml(data)
 
         # Save to file
         if not output_path:
@@ -281,6 +282,7 @@ Only return the XML, no explanations.
 """
 
         llm_response = self._query_llm(prompt)
+        llm_stats.record_call(self.llm_provider, 'xml_generation', submodel_name)
 
         # Clean and validate XML
         xml_content = self._extract_xml_from_response(llm_response)
@@ -395,7 +397,7 @@ Only return the XML, no explanations.
             return response.choices[0].message.content
 
 
-def generate_aas_xml(storage, llm_provider: str = "gemini", output_path: Optional[Path] = None) -> str:
+def generate_aas_xml(storage, llm_provider: str = "gemini", output_path: Optional[Path] = None, data: Optional[Dict[str, Any]] = None) -> str:
     """
     Generate AAS v5.0 XML from validated data.
 
@@ -408,4 +410,4 @@ def generate_aas_xml(storage, llm_provider: str = "gemini", output_path: Optiona
         XML string
     """
     generator = AASXMLGenerator(storage, llm_provider=llm_provider)
-    return generator.generate_xml(output_path=output_path)
+    return generator.generate_xml(output_path=output_path, data=data)

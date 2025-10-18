@@ -15,6 +15,7 @@ if sys.platform == "darwin":  # macOS
     except RuntimeError:
         pass
 
+import json
 import os
 
 # Fix FAISS threading issues on macOS
@@ -25,7 +26,7 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 import shutil
 from pathlib import Path
-from typing import Generator
+from typing import Any, Dict, Generator, List
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -43,6 +44,9 @@ from pdfkg.aas_classifier import classify_pdfs_to_aas
 from pdfkg.aas_extractor import extract_aas_data
 from pdfkg.aas_validator import validate_aas_data
 from pdfkg.aas_xml_generator import generate_aas_xml
+from pdfkg.template_extractor import extract_submodels, available_submodels
+from pdfkg.submodel_templates import get_template
+from pdfkg import llm_stats
 
 
 # System logs buffer (thread-safe)
@@ -166,6 +170,9 @@ except Exception as e:
 
 # Global state
 current_pdf_slug = None
+
+AVAILABLE_SUBMODELS = available_submodels()
+SUBMODEL_CHOICES = [(get_template(key).display_name, key) for key in AVAILABLE_SUBMODELS]
 
 
 def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, force_reprocess: bool, progress=gr.Progress()) -> tuple:
@@ -414,7 +421,21 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
     ingest_processed = ingest_cached = ingest_failed = 0
     ingest_errors = []
     try:
+        # Ensure fresh connections
+        if hasattr(storage, "db_client"):
+            storage.db_client.connect()
+        if hasattr(storage, "milvus_client") and storage.milvus_client:
+            storage.milvus_client.connect()
+
         use_gemini_default = bool(os.getenv("GEMINI_API_KEY"))
+
+        ingest_events: list[str] = []
+
+        def log_progress(pdf_name: str, status: str):
+            message = f"[RESET INGEST] {pdf_name}: {status}"
+            ingest_events.append(message)
+            system_logger.log(message, "INFO")
+
         ingest_results = auto_ingest_directory(
             input_dir=Path("data/input"),
             storage=storage,
@@ -423,7 +444,10 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
             use_gemini=use_gemini_default,
             save_to_db=True,
             save_files=True,
+            progress_callback=log_progress,
+            force_reprocess=True,
         )
+
         ingest_processed = len(ingest_results.get('processed', []))
         ingest_cached = len(ingest_results.get('skipped', []))
         ingest_failed = len(ingest_results.get('failed', []))
@@ -432,6 +456,9 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         status_lines.append(f"  • Processed: {ingest_processed}")
         status_lines.append(f"  • Cached: {ingest_cached}")
         status_lines.append(f"  • Failed: {ingest_failed}")
+
+        if ingest_events:
+            status_lines.extend(["", "#### Detailed progress:"] + ingest_events)
 
         system_logger.log("Reprocessed data/input/ after reset", "INFO")
     except Exception as exc:
@@ -442,6 +469,18 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
     progress(1.0, desc="Reset complete")
 
     pdf_list = storage.list_pdfs()
+
+    # Build cross-document relationships if multiple PDFs present
+    if len(pdf_list) >= 2:
+        try:
+            build_cross_document_relationships(
+                storage=storage,
+                similarity_threshold=0.85,
+                top_k=10
+            )
+            system_logger.log("Rebuilt cross-document relationships after reset", "INFO")
+        except Exception as exc:
+            system_logger.log(f"Failed to rebuild cross-document relationships: {exc}", "ERROR")
     selected_slug = pdf_list[0]['slug'] if pdf_list else None
     current_pdf_slug = selected_slug
 
@@ -460,6 +499,190 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         chatbot_update,
         chat_row_update,
     )
+
+
+SUBMODEL_EDITOR_ORDER = AVAILABLE_SUBMODELS
+
+
+def format_metadata_display(metadata: Dict[str, Dict[str, Any]]) -> str:
+    if not metadata:
+        return 'No evidence captured yet.'
+
+    lines = ['**Confidence & Evidence**']
+    for path_key in sorted(metadata.keys()):
+        info = metadata.get(path_key, {})
+        confidence = info.get('confidence')
+        if isinstance(confidence, (int, float)):
+            confidence_str = f"{confidence:.2f}"
+        else:
+            confidence_str = 'N/A'
+        lines.append(f"- `{path_key}` (confidence {confidence_str})")
+        sources = info.get('sources') or []
+        for source in sources[:3]:
+            lines.append(f"    • {source}")
+        notes = info.get('notes')
+        if notes:
+            lines.append(f"    • Notes: {notes}")
+    return '\n'.join(lines)
+
+
+def extract_submodels_handler(selected_submodels, llm_provider, state):
+    state = dict(state or {})
+    selected_submodels = selected_submodels or []
+
+    editor_updates: List[Any] = []
+    metadata_updates: List[Any] = []
+    accordion_updates: List[Any] = []
+    status_lines: List[str] = []
+
+    if not selected_submodels:
+        status_lines.append('Select at least one submodel to extract.')
+        for key in SUBMODEL_EDITOR_ORDER:
+            editor_updates.append(gr.update(visible=False))
+            metadata_updates.append(gr.update(visible=False))
+            accordion_updates.append(gr.update(visible=False))
+        download_update = gr.update(value=None, visible=False)
+        return '\n'.join(status_lines), state, download_update, *editor_updates, *metadata_updates, *accordion_updates
+
+    try:
+        system_logger.log(f"Extracting submodels: {', '.join(selected_submodels)}", 'INFO')
+        extracted = extract_submodels(storage=storage, submodels=selected_submodels, llm_provider=llm_provider)
+        status_lines.append('Extraction complete.')
+        for key in selected_submodels:
+            template = get_template(key)
+            result = extracted.get(key)
+            if result:
+                data = result.get('data', template.schema)
+                metadata = result.get('metadata', {})
+            else:
+                data = template.schema
+                metadata = {}
+            json_text = json.dumps(data, indent=2)
+            state[key] = {"json": json_text, "metadata": metadata}
+            status_lines.append(f"- {template.display_name}: captured {len(json_text)} characters")
+            metadata_summary = format_metadata_display(metadata)
+            status_lines.append(metadata_summary)
+    except Exception as exc:
+        system_logger.log(f"Extraction failed: {exc}", 'ERROR')
+        status_lines.append(f"Extraction failed: {exc}")
+        for key in SUBMODEL_EDITOR_ORDER:
+            is_selected = key in selected_submodels
+            editor_updates.append(gr.update(visible=is_selected))
+            metadata_updates.append(gr.update(visible=is_selected))
+            accordion_updates.append(gr.update(visible=is_selected))
+        download_update = gr.update(value=None, visible=False)
+        return '\n'.join(status_lines), state, download_update, *editor_updates, *metadata_updates, *accordion_updates
+
+    for key in SUBMODEL_EDITOR_ORDER:
+        entry = state.get(key)
+        if isinstance(entry, str):
+            entry = {"json": entry, "metadata": {}}
+            state[key] = entry
+        if key in selected_submodels:
+            template = get_template(key)
+            if entry is None:
+                entry = {"json": template.default_text, "metadata": {}}
+                state[key] = entry
+            editor_updates.append(gr.update(value=entry["json"], visible=True))
+            metadata_updates.append(gr.update(value=format_metadata_display(entry.get("metadata", {})), visible=True))
+            accordion_updates.append(gr.update(visible=True, open=False))
+        else:
+            editor_updates.append(gr.update(visible=False))
+            metadata_updates.append(gr.update(visible=False))
+            accordion_updates.append(gr.update(visible=False))
+
+    summary_lines = list(llm_stats.summary_lines())
+    for line in summary_lines:
+        system_logger.log(line, 'INFO')
+    status_lines.extend(summary_lines)
+
+    download_update = gr.update(value=None, visible=False)
+    return '\n'.join(status_lines), state, download_update, *editor_updates, *metadata_updates, *accordion_updates
+
+
+
+def update_submodel_editor(value, state, submodel_key):
+    state = dict(state or {})
+    entry = dict(state.get(submodel_key, {}))
+    entry['json'] = value
+    entry.setdefault('metadata', {})
+    state[submodel_key] = entry
+    return state
+
+
+def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.Progress(track_tqdm=False)):
+    state = dict(state or {})
+    selected_submodels = selected_submodels or []
+
+    if not selected_submodels:
+        message = 'Select at least one submodel before generating the AASX.'
+        return message, gr.update(value=None, visible=False)
+
+    compiled: Dict[str, Any] = {}
+    metadata_map: Dict[str, Dict[str, Any]] = {}
+    for key in selected_submodels:
+        entry = state.get(key)
+        if isinstance(entry, str):
+            entry = {"json": entry, "metadata": {}}
+            state[key] = entry
+        if not entry:
+            system_logger.log(f'No data available for submodel {key}.', 'WARNING')
+            continue
+        raw_json = entry.get('json')
+        if not raw_json:
+            system_logger.log(f'No JSON content for submodel {key}.', 'WARNING')
+            continue
+        try:
+            compiled[key] = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            message = f"Invalid JSON for submodel {get_template(key).display_name}: {exc}"
+            system_logger.log(message, 'ERROR')
+            return message, gr.update(value=None, visible=False)
+        metadata_map[key] = entry.get('metadata', {})
+
+    if not compiled:
+        message = 'No submodel data available. Extract or edit templates first.'
+        return message, gr.update(value=None, visible=False)
+
+    progress(0.5, desc='Generating AAS XML...')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = Path('data/output')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    xml_path = output_dir / f'aas_output_{timestamp}.xml'
+
+    xml_output = generate_aas_xml(
+        storage=storage,
+        llm_provider=llm_provider,
+        output_path=xml_path,
+        data=compiled
+    )
+
+    if not xml_output:
+        message = 'XML generation returned no output. Check logs for details.'
+        system_logger.log(message, 'ERROR')
+        return message, gr.update(value=None, visible=False)
+
+    progress(1.0, desc='Complete')
+    system_logger.log(f'Generated XML at {xml_path}', 'INFO')
+    summary_lines = list(llm_stats.summary_lines())
+    for line in summary_lines:
+        system_logger.log(line, 'INFO')
+
+    status_lines = [
+        'AAS XML generated successfully.',
+        f"Submodels: {', '.join(compiled.keys())}",
+        f'Saved to: {xml_path}'
+    ]
+
+    for key in compiled.keys():
+        template = get_template(key)
+        status_lines.append(f"\n### {template.display_name}")
+        status_lines.append(format_metadata_display(metadata_map.get(key, {})))
+
+    status_lines.extend(summary_lines)
+
+    return '\n'.join(status_lines), gr.update(value=str(xml_path), visible=True)
+
 
 
 def chat_response(
@@ -1349,9 +1572,9 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
         with gr.Tab("🏭 Generate AASX", id="tab_aasx"):
             gr.Markdown(
                 """
-                ## Generate AAS (Asset Administration Shell) Files
+                ## Template-Driven AAS Generation
 
-                Transform your technical PDFs into standardized AAS v5.0 XML files through a 4-phase pipeline.
+                Choose the submodels you need, review the extracted JSON, optionally edit it, then generate the final AAS XML file.
                 """
             )
 
@@ -1365,38 +1588,58 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                             ("Mistral", "mistral"),
                         ],
                         value="gemini" if os.getenv("GEMINI_API_KEY") else "mistral",
-                        label="LLM Provider for AAS Pipeline",
-                        info="AI model for classification and extraction"
+                        label="LLM Provider",
+                        info="Model used for template extraction and XML generation"
+                    )
+
+                    submodel_selector = gr.CheckboxGroup(
+                        choices=SUBMODEL_CHOICES,
+                        label="Submodels",
+                        info="Select the submodels to extract, edit, and include in the final AAS file."
+                    )
+
+                    extract_submodels_btn = gr.Button(
+                        "🧠 Extract Selected Submodels",
+                        variant="primary"
                     )
 
                     generate_aasx_btn = gr.Button(
-                        "🚀 Generate AAS File (Full Pipeline)",
-                        variant="primary",
-                        size="lg"
-                    )
-
-                    gr.Markdown(
-                        """
-                        **Pipeline Phases:**
-                        1. 📋 **Classify** - Identify AAS submodels
-                        2. 📊 **Extract** - Extract structured data
-                        3. ✅ **Validate** - Validate and complete data
-                        4. 📄 **Generate** - Create AAS v5.0 XML
-                        """
+                        "📦 Generate AASX from Current Data",
+                        variant="primary"
                     )
 
                 with gr.Column(scale=2):
-                    gr.Markdown("### 📄 Results")
-
-                    aasx_status = gr.Markdown(
-                        value="Click 'Generate AAS File' to start the pipeline.",
-                        label="Status"
+                    submodel_status = gr.Markdown(
+                        value="Select one or more submodels and click **Extract** to populate their templates.",
+                        label="Extraction Status"
                     )
 
                     download_file = gr.File(
                         label="Download AAS File",
                         visible=False
                     )
+
+                    submodel_editor_components = {}
+                    for key in AVAILABLE_SUBMODELS:
+                        template = get_template(key)
+                        with gr.Accordion(f"{template.display_name}", open=False, visible=False) as accordion:
+                            editor = gr.Textbox(
+                                value=template.default_text,
+                                lines=18,
+                                label=f"{template.display_name} JSON",
+                                interactive=True,
+                                visible=True
+                            )
+                            evidence_display = gr.Markdown(
+                                value="No evidence captured yet.",
+                                visible=True,
+                                label="Evidence"
+                            )
+                        submodel_editor_components[key] = {
+                            "accordion": accordion,
+                            "editor": editor,
+                            "metadata": evidence_display,
+                        }
 
         # =======================
         # TAB 4: System Logs
@@ -1425,6 +1668,8 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
             )
 
             logs_refresh_timer = gr.Timer(value=5.0, render=False)
+
+    submodel_state = gr.State({})
 
     # ================================
     # EVENT HANDLERS - Tab 1 (Ingestion)
@@ -1476,17 +1721,35 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
     # ============================
     # EVENT HANDLERS - Tab 3 (AASX)
     # ============================
-    def generate_and_show_download(llm_provider, progress=gr.Progress()):
-        status_msg, file_path = generate_aasx_file(llm_provider, progress)
-        if file_path:
-            return status_msg, gr.update(value=file_path, visible=True)
-        else:
-            return status_msg, gr.update(visible=False)
+    extract_outputs = [submodel_status, submodel_state, download_file]
+    extract_outputs.extend([submodel_editor_components[key]['editor'] for key in SUBMODEL_EDITOR_ORDER])
+    extract_outputs.extend([submodel_editor_components[key]['metadata'] for key in SUBMODEL_EDITOR_ORDER])
+    extract_outputs.extend([submodel_editor_components[key]['accordion'] for key in SUBMODEL_EDITOR_ORDER])
+
+    extract_submodels_btn.click(
+        fn=extract_submodels_handler,
+        inputs=[submodel_selector, aasx_llm_provider, submodel_state],
+        outputs=extract_outputs
+    )
+
+    for key in SUBMODEL_EDITOR_ORDER:
+        editor_component = submodel_editor_components[key]['editor']
+        editor_component.change(
+            fn=lambda value, state, submodel_key=key: update_submodel_editor(value, state, submodel_key),
+            inputs=[editor_component, submodel_state],
+            outputs=[submodel_state]
+        )
 
     generate_aasx_btn.click(
-        fn=generate_and_show_download,
-        inputs=[aasx_llm_provider],
-        outputs=[aasx_status, download_file]
+        fn=generate_selected_aasx,
+        inputs=[aasx_llm_provider, submodel_selector, submodel_state],
+        outputs=[submodel_status, download_file]
+    )
+
+    submodel_selector.change(
+        fn=lambda _: gr.update(value=None, visible=False),
+        inputs=[submodel_selector],
+        outputs=download_file
     )
 
     # ============================

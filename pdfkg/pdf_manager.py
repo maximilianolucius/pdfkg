@@ -596,6 +596,7 @@ def auto_ingest_directory(
     save_to_db: bool = True,
     save_files: bool = True,
     progress_callback: Optional[Callable[[str, str], None]] = None,
+    force_reprocess: bool = False,
 ) -> Dict[str, List[str]]:
     """
     Automatically ingest all PDFs from a directory, skipping already-processed ones.
@@ -609,6 +610,7 @@ def auto_ingest_directory(
         save_to_db: Save to database backend
         save_files: Export legacy file formats
         progress_callback: Function(pdf_name: str, status: str) for progress updates
+        force_reprocess: Re-ingest even if entries already exist in storage
 
     Returns:
         Dictionary with 'processed', 'skipped', and 'failed' lists of filenames
@@ -638,7 +640,7 @@ def auto_ingest_directory(
 
             # Check if already in database
             already_processed = False
-            if storage and save_to_db:
+            if not force_reprocess and storage and save_to_db:
                 pdf_info = storage.get_pdf_metadata(pdf_slug)
                 if pdf_info:
                     already_processed = True
@@ -664,7 +666,7 @@ def auto_ingest_directory(
                 max_tokens=max_tokens,
                 use_gemini=use_gemini,
                 gemini_pages="",  # Process all pages if Gemini enabled
-                force_reprocess=False,
+                force_reprocess=force_reprocess,
                 save_to_db=save_to_db,
                 save_files=save_files,
                 output_dir=None,
