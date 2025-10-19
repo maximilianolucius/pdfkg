@@ -1,0 +1,62 @@
+version: '3.8'
+
+# Docker Compose configuration optimized for macOS
+# Usage: docker-compose -f docker-compose.mac.yml up -d
+
+services:
+  arangodb:
+    image: arangodb:latest
+    container_name: pdfkg-arangodb
+    environment:
+      - ARANGO_ROOT_PASSWORD=
+    ports:
+      - "8529:8529"
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+      - arangodb_apps:/var/lib/arangodb3-apps
+    restart: unless-stopped
+    # Mac-specific: Use explicit endpoint binding
+    command:
+      - arangod
+      - --server.endpoint=tcp://0.0.0.0:8529
+    # Mac-specific: Add platform specification
+    platform: linux/amd64
+
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: pdfkg-milvus-etcd
+    platform: linux/amd64
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: pdfkg-milvus
+    platform: linux/amd64
+    depends_on:
+      - milvus-etcd
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    restart: unless-stopped
+    environment:
+      # Mac-specific: Use external etcd instead of embedded
+      - ETCD_ENDPOINTS=milvus-etcd:2379
+      - COMMON_STORAGETYPE=local
+      # Mac-specific: Disable seccomp for compatibility
+    command: milvus run standalone
+
+volumes:
+  arangodb_data:
+  arangodb_apps:
+  milvus_data:
+  etcd_data:
