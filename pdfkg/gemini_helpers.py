@@ -55,8 +55,10 @@ def gemini_extract_crossrefs(
 
     genai.configure(api_key=api_key)
 
-    # Upload PDF
-    pdf_file = genai.upload_file(str(pdf_path))
+    # Upload PDF (compatible with v0.8.x and v0.9+)
+    pdf_path_str = str(pdf_path)
+    pdf_file = genai.upload_file(pdf_path_str)
+
     # Wait for processing
     while pdf_file.state.name == "PROCESSING":
         time.sleep(2)

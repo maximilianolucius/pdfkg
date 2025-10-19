@@ -20,7 +20,7 @@ google-api-core==2.25.2
 google-api-python-client==2.184.0
 google-auth==2.41.1
 google-auth-httplib2==0.2.0
-google-generativeai==0.8.5
+google-generativeai==0.8.5  # Pinned due to breaking changes in v0.9+
 googleapis-common-protos==1.70.0
 gradio==5.49.0
 gradio_client==1.13.3
