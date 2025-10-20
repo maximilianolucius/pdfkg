@@ -1808,10 +1808,29 @@ if __name__ == "__main__":
     print("=" * 80)
     print("\n🚀 Starting web server...\n")
 
-    # Launch with share=True for public link
-    demo.launch(
-        share=True,
-        server_name="0.0.0.0",
-        server_port=8016,
-        show_error=True
-    )
+    # Try ports in sequence until one is available
+    ports_to_try = [8016, 8017, 8018, 8019, 7860]
+    server_port = None
+
+    for port in ports_to_try:
+        try:
+            # Launch with share=True for public link
+            demo.launch(
+                share=True,
+                server_name="0.0.0.0",
+                server_port=port,
+                show_error=True
+            )
+            server_port = port
+            break  # Success!
+        except OSError as e:
+            if "Cannot find empty port" in str(e):
+                print(f"⚠️  Port {port} is busy, trying next port...")
+                continue
+            else:
+                raise  # Re-raise if it's a different error
+
+    if server_port is None:
+        print(f"\n❌ ERROR: All ports {ports_to_try} are busy!")
+        print("Kill existing processes with: pkill -f 'python.*app.py'")
+        sys.exit(1)
