@@ -225,6 +225,7 @@ def ingest_pdf(
         FileNotFoundError: If PDF file doesn't exist
         ValueError: If invalid parameters provided
     """
+    from pdfkg.parse_pdf import load_pdf, extract_pages, extract_toc
     from pdfkg.topology import build_section_tree
     from pdfkg.chunking import build_chunks
     from pdfkg.embeds import embed_chunks, build_faiss_index
