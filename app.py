@@ -314,6 +314,13 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
                 status_parts.append(f"- Pages: {s['num_pages']}, Chunks: {s['num_chunks']}, Sections: {s['num_sections']}")
                 status_parts.append(f"- Figures: {s['num_figures']}, Tables: {s['num_tables']}")
                 status_parts.append(f"- Cross-refs: {s['num_mentions']} ({s['num_resolved_mentions']} resolved)")
+                # Display AAS classification results
+                if s.get('aas_classification'):
+                    submodels = s['aas_classification'].get('submodels', [])
+                    if submodels:
+                        scores = s['aas_classification'].get('confidence_scores', {})
+                        tags = [f"{sm} ({scores.get(sm, 0):.2f})" for sm in submodels]
+                        status_parts.append(f"- **Submodels**: {', '.join(tags)}")
             status_parts.append("")
 
         # Cached PDFs
@@ -526,7 +533,7 @@ def format_metadata_display(metadata: Dict[str, Dict[str, Any]]) -> str:
     return '\n'.join(lines)
 
 
-def extract_submodels_handler(selected_submodels, llm_provider, state):
+def extract_submodels_handler(selected_submodels, llm_provider, state, progress=gr.Progress(track_tqdm=True)):
     state = dict(state or {})
     selected_submodels = selected_submodels or []
 
@@ -546,7 +553,16 @@ def extract_submodels_handler(selected_submodels, llm_provider, state):
 
     try:
         system_logger.log(f"Extracting submodels: {', '.join(selected_submodels)}", 'INFO')
-        extracted = extract_submodels(storage=storage, submodels=selected_submodels, llm_provider=llm_provider)
+
+        def progress_callback(pct, desc):
+            progress(pct, desc=desc)
+
+        extracted = extract_submodels(
+            storage=storage,
+            submodels=selected_submodels,
+            llm_provider=llm_provider,
+            progress_callback=progress_callback
+        )
         status_lines.append('Extraction complete.')
         for key in selected_submodels:
             template = get_template(key)
@@ -610,7 +626,7 @@ def update_submodel_editor(value, state, submodel_key):
     return state
 
 
-def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.Progress(track_tqdm=False)):
+def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.Progress(track_tqdm=True)):
     state = dict(state or {})
     selected_submodels = selected_submodels or []
 
@@ -689,80 +705,58 @@ def chat_response(
     message: str, history: list, selected_pdf: str, llm_provider: str, top_k: int, embed_model: str
 ) -> Generator:
     """
-    Generate response to user question.
-
-    Args:
-        message: User question
-        history: Chat history
-        selected_pdf: Selected PDF slug
-        llm_provider: LLM provider ("none", "gemini", or "mistral")
-        top_k: Number of chunks to retrieve
-        embed_model: Embedding model name
-
-    Yields:
-        Updated chat history
+    Generate response to user question using the Query Planner and Orchestrator.
     """
-    print(f"\n{'='*60}")
-    print(f"DEBUG Q&A: New question received")
-    print(f"DEBUG Q&A: Question: {message}")
-    print(f"DEBUG Q&A: Selected PDF: {selected_pdf}")
-    print(f"DEBUG Q&A: LLM Provider: {llm_provider}")
-    print(f"DEBUG Q&A: Top K: {top_k}")
-    print(f"DEBUG Q&A: Embed Model: {embed_model}")
-
     if not selected_pdf:
-        print(f"DEBUG Q&A: ERROR - No PDF selected")
         history.append((message, "⚠️ Please select a PDF from the dropdown first."))
         yield history
         return
 
     try:
-        # Get answer using storage backend
-        print(f"DEBUG Q&A: Calling answer_question()...")
+        # Get answer using the new orchestrated query pipeline
         result = answer_question(
-            message,
-            selected_pdf,  # Pass slug instead of directory
+            question=message,
+            pdf_slug=selected_pdf,
             model_name=embed_model,
             top_k=top_k,
             llm_provider=llm_provider,
             storage=storage,
         )
-        print(f"DEBUG Q&A: answer_question() completed successfully")
 
-        # Format response
-        answer = result["answer"]
+        # Format the response
+        answer = result.get("answer", "No answer could be generated.")
+        sources = result.get("sources", [])
 
-        # Add source references if verbose
-        sources = result["sources"][:3]  # Top 3 sources
-        if sources and llm_provider == "none":  # LLM modes already include context
+        # Add source references
+        if sources:
             source_refs = "\n\n📚 **Sources:**\n"
-            for i, src in enumerate(sources, 1):
-                source_refs += f"{i}. Section {src['section_id']}, Page {src['page']} (score: {src['similarity_score']:.2f})\n"
+            for i, src in enumerate(sources[:5], 1): # Show top 5 sources
+                # Handle different source types (chunk vs. graph node)
+                if 'text' in src: # It's a chunk
+                    page = src.get('page', 'N/A')
+                    section = src.get('section_id', 'N/A')
+                    score = src.get('similarity_score')
+                    score_str = f"(score: {score:.2f})" if score else ""
+                    source_refs += f"{i}. Section {section}, Page {page} {score_str}\n"
+                else: # It's a graph node
+                    node_type = src.get('type', 'Node')
+                    label = src.get('label', src.get('_key', 'N/A'))
+                    source_refs += f"{i}. {node_type}: {label}\n"
             answer += source_refs
 
-        # Add related content
-        related = result["related"]
-        if any(related.values()):
-            answer += "\n\n🔗 **Related:**"
-            if related["figures"]:
-                answer += f"\n- Figures: {', '.join(related['figures'][:3])}"
-            if related["tables"]:
-                answer += f"\n- Tables: {', '.join(related['tables'][:3])}"
-            if related["sections"]:
-                answer += f"\n- Sections: {', '.join(related['sections'][:3])}"
+        # Optionally, add the debug plan to the output
+        if "debug" in result and result["debug"].get("plan"):
+            plan_json = json.dumps(result["debug"]["plan"], indent=2)
+            answer += f"\n\n🔍 **Query Plan:**\n```json\n{plan_json}\n```"
 
-        print(f"DEBUG Q&A: Formatting and returning answer")
         history.append((message, answer))
         yield history
 
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"\n{'='*60}")
-        print(f"ERROR Q&A: Exception during question answering")
-        print(f"ERROR Q&A: {error_details}")
-        print(f"{'='*60}\n")
-        history.append((message, f"❌ **Error:** {str(e)}\n\nCheck terminal for full traceback."))
+        system_logger.log(f"Q&A Error: {error_details}", "ERROR")
+        history.append((message, f"❌ **Error:** {str(e)}\n\nCheck system logs for full traceback."))
         yield history
 
 
@@ -1791,7 +1785,7 @@ if __name__ == "__main__":
     # Check LLM providers
     llm_status = []
     if os.getenv("GEMINI_API_KEY"):
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         llm_status.append(f"✅ Gemini enabled: {gemini_model}")
     else:
         llm_status.append("⚠️  Gemini disabled: GEMINI_API_KEY not set in .env")

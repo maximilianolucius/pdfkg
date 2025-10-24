@@ -185,7 +185,7 @@ def main():
     llm_status = "none"
     if args.llm_provider == "gemini":
         if os.getenv("GEMINI_API_KEY"):
-            gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+            gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             llm_status = f"Gemini ({gemini_model})"
         else:
             print("Warning: Gemini selected but GEMINI_API_KEY not found in environment")

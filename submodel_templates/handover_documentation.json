@@ -1,0 +1,18 @@
+{
+  "Certificates": [
+    {
+      "CertificateType": null,
+      "CertificateNumber": null,
+      "Issuer": null,
+      "IssueDate": null,
+      "Validity": null
+    }
+  ],
+  "Declarations": [
+    {
+      "Name": null,
+      "Reference": null,
+      "Notes": null
+    }
+  ]
+}

@@ -64,7 +64,7 @@ class TemplateAASExtractor:
             if not api_key:
                 raise ValueError("GEMINI_API_KEY not configured")
             genai.configure(api_key=api_key)
-            model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
         elif self.llm_provider == "mistral":
             if not MISTRAL_AVAILABLE:
@@ -78,16 +78,26 @@ class TemplateAASExtractor:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}")
 
     # ------------------------------------------------------------------
-    def extract(self, submodels: Iterable[str]) -> Dict[str, ExtractionResult]:
+    def extract(self, submodels: Iterable[str], progress_callback=None) -> Dict[str, ExtractionResult]:
         pdf_slugs = [pdf["slug"] for pdf in self.storage.list_pdfs()]
         if not pdf_slugs:
             raise RuntimeError("No PDFs available for extraction. Ingest PDFs first.")
 
         results: Dict[str, ExtractionResult] = {}
-        for submodel in submodels:
+        submodel_list = list(submodels)
+        total_submodels = len(submodel_list)
+
+        for i, submodel in enumerate(submodel_list):
+            if progress_callback:
+                progress_callback(i / total_submodels, f"Extracting {submodel}...")
+
             template = get_template(submodel)
             data, metadata = self._extract_submodel(submodel, template.schema, pdf_slugs)
             results[submodel] = ExtractionResult(data=data, metadata=metadata)
+
+        if progress_callback:
+            progress_callback(1.0, "Extraction complete.")
+
         return results
 
     # ------------------------------------------------------------------
@@ -292,9 +302,9 @@ class TemplateAASExtractor:
         return payload
 
 
-def extract_submodels(storage, submodels: Iterable[str], llm_provider: str = "gemini") -> Dict[str, Dict[str, Any]]:
+def extract_submodels(storage, submodels: Iterable[str], llm_provider: str = "gemini", progress_callback=None) -> Dict[str, Dict[str, Any]]:
     extractor = TemplateAASExtractor(storage=storage, llm_provider=llm_provider)
-    raw_results = extractor.extract(submodels)
+    raw_results = extractor.extract(submodels, progress_callback=progress_callback)
     prepared: Dict[str, Dict[str, Any]] = {}
     for key, result in raw_results.items():
         prepared[key] = {"data": result.data, "metadata": result.metadata}

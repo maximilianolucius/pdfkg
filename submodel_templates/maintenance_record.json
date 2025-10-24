@@ -1,0 +1,18 @@
+{
+  "MaintenanceIntervals": null,
+  "MaintenanceProcedures": [
+    {
+      "Task": null,
+      "Interval": null,
+      "Tools": null,
+      "Notes": null
+    }
+  ],
+  "SpareParts": [
+    {
+      "PartNumber": null,
+      "Description": null,
+      "Quantity": null
+    }
+  ]
+}

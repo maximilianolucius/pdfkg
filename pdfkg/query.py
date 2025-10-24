@@ -277,7 +277,7 @@ def generate_answer_gemini(question: str, context_chunks: list[dict]) -> str:
     genai.configure(api_key=api_key)
 
     # Get model name from environment or use default
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
     # Build context (include PDF filename if available for global search)
     context_parts = []
@@ -541,7 +541,7 @@ def answer_question(
     if llm_provider == "gemini":
         print(f"DEBUG QUERY: Using Gemini for answer generation")
         answer = generate_answer_gemini(question, chunks)
-        llm_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        llm_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     elif llm_provider == "mistral":
         print(f"DEBUG QUERY: Using Mistral for answer generation")
         answer = generate_answer_mistral(question, chunks)

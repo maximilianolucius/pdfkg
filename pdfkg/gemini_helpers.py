@@ -98,7 +98,7 @@ def gemini_extract_crossrefs(
     }
 
     # Get model name from environment or use default
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     prompt = f"""
 You are analyzing pages {page_start} to {page_end} of a technical PDF manual.

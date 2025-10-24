@@ -675,3 +675,43 @@ class ArangoDBClient:
         except Exception as e:
             # Graph might already exist or other error
             print(f"Note: Could not create named graph {graph_name}: {e}")
+
+    def execute_aql(self, aql_query: str) -> list[dict]:
+        """
+        Executes a raw AQL query.
+
+        Args:
+            aql_query: The AQL query string to execute.
+
+        Returns:
+            A list of result documents.
+        """
+        cursor = self.db.aql.execute(aql_query)
+        return list(cursor)
+
+    def get_chunks_by_keys(self, keys: list[str]) -> list[dict]:
+        """
+        Retrieves a list of chunk documents by their keys (_key).
+
+        Args:
+            keys: A list of document keys.
+
+        Returns:
+            A list of chunk documents.
+        """
+        if not keys:
+            return []
+
+        query = """
+            FOR chunk IN @@collection
+            FILTER chunk._key IN @keys
+            RETURN chunk
+        """
+        cursor = self.db.aql.execute(
+            query,
+            bind_vars={
+                "@collection": self.CHUNKS,
+                "keys": keys,
+            },
+        )
+        return list(cursor)

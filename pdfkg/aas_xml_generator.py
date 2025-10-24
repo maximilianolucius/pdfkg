@@ -73,7 +73,7 @@ class AASXMLGenerator:
             if not api_key:
                 raise ValueError("GEMINI_API_KEY not found in environment")
             genai.configure(api_key=api_key)
-            model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
             print(f"✅ Initialized Gemini model: {model_name}")
 

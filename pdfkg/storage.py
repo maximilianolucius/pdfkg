@@ -232,6 +232,14 @@ class ArangoStorage(StorageBackend):
     def get_graph(self, slug: str) -> tuple[list[dict], list[dict]]:
         return self.db_client.get_graph(slug)
 
+    def execute_aql(self, aql_query: str) -> list[dict]:
+        """Executes a raw AQL query."""
+        return self.db_client.execute_aql(aql_query)
+
+    def get_chunks_by_keys(self, keys: list[str]) -> list[dict]:
+        """Retrieves a list of chunk documents by their keys."""
+        return self.db_client.get_chunks_by_keys(keys)
+
     def load_graph(self, slug: str):
         """Load graph from database and convert to NetworkX."""
         import networkx as nx

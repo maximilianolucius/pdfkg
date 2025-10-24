@@ -1,0 +1,16 @@
+{
+  "ManufacturerName": null,
+  "ManufacturerProductDesignation": null,
+  "SerialNumber": null,
+  "YearOfConstruction": null,
+  "PartNumber": null,
+  "AssetIdentification": {
+    "AssetID": null,
+    "Issuer": null
+  },
+  "ContactInformation": {
+    "Phone": null,
+    "Email": null,
+    "Website": null
+  }
+}

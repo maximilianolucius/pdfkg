@@ -1,0 +1,23 @@
+{
+  "GeneralTechnicalData": {
+    "ProductArticleNumber": null,
+    "Weight": null,
+    "Dimensions": null
+  },
+  "ElectricalProperties": {
+    "VoltageRange": null,
+    "Current": null,
+    "Power": null,
+    "Frequency": null
+  },
+  "MechanicalProperties": {
+    "Torque": null,
+    "Speed": null,
+    "Pressure": null
+  },
+  "EnvironmentalProperties": {
+    "OperatingTemperature": null,
+    "StorageTemperature": null,
+    "IngressProtection": null
+  }
+}

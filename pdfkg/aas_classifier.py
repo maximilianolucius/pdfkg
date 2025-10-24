@@ -84,7 +84,7 @@ class AASClassifier:
             if not api_key:
                 raise ValueError("GEMINI_API_KEY not found in environment")
             genai.configure(api_key=api_key)
-            model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
             print(f"✅ Initialized Gemini model: {model_name}")
 
@@ -386,3 +386,24 @@ def classify_pdfs_to_aas(storage, llm_provider: str = "gemini") -> Dict[str, Dic
     """
     classifier = AASClassifier(storage, llm_provider=llm_provider)
     return classifier.classify_all_pdfs()
+
+
+def classify_single_pdf_submodels(storage, pdf_slug: str, llm_provider: str = "gemini") -> Optional[Dict]:
+    """
+    Classify a single PDF to AAS submodels without instantiating the full class.
+    This is a lightweight version for use during ingestion.
+
+    Args:
+        storage: Storage backend
+        pdf_slug: The slug of the PDF to classify
+        llm_provider: LLM provider ("gemini" or "mistral")
+
+    Returns:
+        A dictionary with classification results, or None on failure.
+    """
+    try:
+        classifier = AASClassifier(storage, llm_provider=llm_provider)
+        return classifier.classify_pdf(pdf_slug)
+    except Exception as e:
+        print(f"❌ Error during single PDF classification for {pdf_slug}: {e}")
+        return None

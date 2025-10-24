@@ -138,6 +138,7 @@ class IngestionResult:
         mentions: List,
         graph: nx.MultiDiGraph,
         was_cached: bool = False,
+        aas_classification: Optional[Dict] = None,
     ):
         self.pdf_slug = pdf_slug
         self.original_filename = original_filename
@@ -151,6 +152,7 @@ class IngestionResult:
         self.mentions = mentions
         self.graph = graph
         self.was_cached = was_cached
+        self.aas_classification = aas_classification
 
     def summary(self) -> Dict[str, Any]:
         """Return summary statistics."""
@@ -168,6 +170,7 @@ class IngestionResult:
             "num_graph_edges": self.graph.number_of_edges(),
             "embedding_dim": self.embeddings.shape[1] if self.embeddings is not None else 0,
             "was_cached": self.was_cached,
+            "aas_classification": self.aas_classification,
         }
 
 
@@ -222,7 +225,6 @@ def ingest_pdf(
         FileNotFoundError: If PDF file doesn't exist
         ValueError: If invalid parameters provided
     """
-    from pdfkg.parse_pdf import load_pdf, extract_pages, extract_toc
     from pdfkg.topology import build_section_tree
     from pdfkg.chunking import build_chunks
     from pdfkg.embeds import embed_chunks, build_faiss_index
@@ -230,10 +232,11 @@ def ingest_pdf(
     from pdfkg.xrefs import extract_mentions, resolve_mentions
     from pdfkg.graph import build_graph, export_graph
     from pdfkg.report import generate_report
+    from pdfkg.aas_classifier import classify_single_pdf_submodels
 
     # Optional Gemini import
     gemini_available = False
-    if use_gemini:
+    if use_gemini or os.getenv("GEMINI_API_KEY"):
         try:
             from pdfkg.gemini_helpers import gemini_extract_crossrefs, merge_gemini_crossrefs
             gemini_available = True
@@ -342,6 +345,7 @@ def ingest_pdf(
                 mentions=mentions,
                 graph=graph,
                 was_cached=True,
+                aas_classification=metadata.get('aas_classification'),
             )
 
     # Step 1: Load PDF
@@ -508,6 +512,19 @@ def ingest_pdf(
         storage.save_metadata(pdf_slug, "figures", figures)
         storage.save_metadata(pdf_slug, "tables", tables)
 
+    # New Step 14: AAS Submodel Classification
+    aas_classification_result = None
+    if storage and save_to_db and os.getenv("GEMINI_API_KEY"):
+        progress(0.92, "Classifying AAS submodels...")
+        aas_classification_result = classify_single_pdf_submodels(
+            storage=storage,
+            pdf_slug=pdf_slug,
+            llm_provider="gemini"
+        )
+        if aas_classification_result:
+            storage.save_metadata(pdf_slug, "aas_classification", aas_classification_result)
+            progress(0.94, "AAS classification saved")
+
     # Export files
     if save_files:
         progress(0.95, "Exporting files...")
@@ -562,6 +579,7 @@ def ingest_pdf(
         mentions=all_mentions,
         graph=graph,
         was_cached=False,
+        aas_classification=aas_classification_result,
     )
 
 
