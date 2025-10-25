@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -270,18 +271,51 @@ class TemplateAASExtractor:
         return "\n\n".join(context_blocks[:8])  # limit context size
 
     def _query_llm(self, prompt: str) -> str:
-        if self.llm_provider == "gemini":
-            response = self.llm_client.generate_content(prompt)
-            return response.text
-        if self.llm_provider == "mistral":
-            response = self.llm_client.chat.complete(
-                model=self.mistral_model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.choices[0].message.content
-        raise RuntimeError("Unsupported LLM provider")
+        max_retries = 4
+        retry_delay = 30  # seconds
+
+        for attempt in range(max_retries + 1):
+            try:
+                if self.llm_provider == "gemini":
+                    response = self.llm_client.generate_content(
+                        prompt,
+                        request_options={'timeout': 240}  # 4 minutes timeout
+                    )
+                    return response.text
+                elif self.llm_provider == "mistral":
+                    response = self.llm_client.chat.complete(
+                        model=self.mistral_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=240  # 4 minutes timeout
+                    )
+                    content = response.choices[0].message.content
+                    # Mistral sometimes returns list, ensure it's always a string
+                    if isinstance(content, list):
+                        content = "\n".join(str(item) for item in content)
+                    return str(content)
+                else:
+                    raise RuntimeError("Unsupported LLM provider")
+
+            except Exception as e:
+                error_str = str(e).lower()
+                is_timeout = any(keyword in error_str for keyword in ['timeout', '504', 'deadline', 'timed out'])
+
+                if is_timeout and attempt < max_retries:
+                    print(f"⚠️  Timeout on attempt {attempt + 1}/{max_retries + 1}. Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # Re-raise if not a timeout or max retries reached
+                    raise
 
     def _parse_field_response(self, response_text: str) -> Dict[str, Any]:
+        # Ensure response_text is a string (defensive programming)
+        if not isinstance(response_text, str):
+            if isinstance(response_text, list):
+                response_text = "\n".join(str(item) for item in response_text)
+            else:
+                response_text = str(response_text)
+
         cleaned = response_text.strip()
         if "```json" in cleaned:
             cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0]
