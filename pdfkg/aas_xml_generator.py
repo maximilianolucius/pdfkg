@@ -12,6 +12,7 @@ Structure:
 
 import json
 import os
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -281,8 +282,7 @@ Generate the complete <submodel> element with ALL data from the JSON.
 Only return the XML, no explanations.
 """
 
-        llm_response = self._query_llm(prompt)
-        llm_stats.record_call(self.llm_provider, 'xml_generation', submodel_name)
+        llm_response = self._query_llm(prompt, label=submodel_name)
 
         # Clean and validate XML
         xml_content = self._extract_xml_from_response(llm_response)
@@ -383,16 +383,48 @@ Only return the XML, no explanations.
                 .replace('"', "&quot;")
                 .replace("'", "&apos;"))
 
-    def _query_llm(self, prompt: str) -> str:
+    def _query_llm(self, prompt: str, *, label: str) -> str:
         """Query the LLM and return response text."""
         if self.llm_provider == "gemini":
+            start = time.time()
             response = self.llm_client.generate_content(prompt)
+            usage = getattr(response, "usage_metadata", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='xml_generation',
+                label=label,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
+            )
             return response.text
 
         elif self.llm_provider == "mistral":
+            start = time.time()
             response = self.llm_client.chat.complete(
                 model=self.mistral_model,
                 messages=[{"role": "user", "content": prompt}]
+            )
+            usage = getattr(response, "usage", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='xml_generation',
+                label=label,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": self.mistral_model,
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
             )
             return response.choices[0].message.content
 

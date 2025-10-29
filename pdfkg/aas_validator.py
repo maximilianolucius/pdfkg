@@ -17,7 +17,10 @@ If incomplete:
 
 import json
 import os
+import time
 from typing import Dict, List, Optional, Any, Tuple
+
+from pdfkg import llm_stats
 
 # LLM imports
 try:
@@ -238,7 +241,7 @@ Return ONLY valid JSON in this exact format:
 Be strict but practical. Mark as incomplete if mandatory data is missing.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="validation_overview")
         validation = self._parse_json_response(llm_response)
 
         # Ensure structure
@@ -331,7 +334,8 @@ Be strict but practical. Mark as incomplete if mandatory data is missing.
 
         # Extract missing data with LLM
         extraction_prompt = self._build_extraction_prompt(submodel, field, context)
-        llm_response = self._query_llm(extraction_prompt)
+        label = f"completion:{submodel}.{field or 'unknown'}"
+        llm_response = self._query_llm(extraction_prompt, label=label)
         extracted = self._parse_json_response(llm_response)
 
         if extracted:
@@ -471,16 +475,48 @@ Return ONLY valid JSON with any relevant data found.
 
         return results
 
-    def _query_llm(self, prompt: str) -> str:
+    def _query_llm(self, prompt: str, *, label: str) -> str:
         """Query the LLM and return response text."""
         if self.llm_provider == "gemini":
+            start = time.time()
             response = self.llm_client.generate_content(prompt)
+            usage = getattr(response, "usage_metadata", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='validation',
+                label=label,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
+            )
             return response.text
 
         elif self.llm_provider == "mistral":
+            start = time.time()
             response = self.llm_client.chat.complete(
                 model=self.mistral_model,
                 messages=[{"role": "user", "content": prompt}]
+            )
+            usage = getattr(response, "usage", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='validation',
+                label=label,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": self.mistral_model,
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
             )
             return response.choices[0].message.content
 

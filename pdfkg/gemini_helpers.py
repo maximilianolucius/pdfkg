@@ -17,6 +17,7 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+from pdfkg import llm_stats
 from pdfkg.config import Mention
 
 
@@ -126,7 +127,25 @@ Return strict JSON matching the schema.
         },
     )
 
+    start = time.time()
     response = model.generate_content([prompt, pdf_file])
+    usage = getattr(response, "usage_metadata", None)
+    tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+    label = f"{Path(pdf_path).name}:{page_start}-{page_end}"
+    llm_stats.record_call(
+        "gemini",
+        phase="crossref",
+        label=label,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        total_tokens=total_tokens,
+        metadata={
+            "model": model_name,
+            "elapsed_ms": int((time.time() - start) * 1000),
+            "prompt_chars": len(prompt),
+            "pages": [page_start, page_end],
+        },
+    )
     import json
 
     return json.loads(response.text)

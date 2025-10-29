@@ -150,8 +150,11 @@ class TemplateAASExtractor:
         field_label = path[-1] if path else submodel
         evidence = self._collect_field_evidence(field_path, pdf_slugs)
         prompt = self._build_field_prompt(submodel, field_path, field_label, evidence)
-        response = self._query_llm(prompt)
-        llm_stats.record_call(self.llm_provider, phase="extraction", label=f"{submodel}:{field_path}")
+        response = self._query_llm(
+            prompt,
+            phase="extraction",
+            label=f"{submodel}:{field_path}",
+        )
         extracted = self._parse_field_response(response)
 
         value = extracted.get("value")
@@ -166,8 +169,11 @@ class TemplateAASExtractor:
         evidence = self._collect_field_evidence(".".join(path), pdf_slugs, max_snippets=8)
         template_json = json.dumps(item_schema, indent=2) if item_schema is not None else "null"
         prompt = self._build_list_prompt(submodel, field_path, template_json, evidence)
-        response = self._query_llm(prompt)
-        llm_stats.record_call(self.llm_provider, phase="extraction", label=f"{submodel}:{field_path}")
+        response = self._query_llm(
+            prompt,
+            phase="extraction",
+            label=f"{submodel}:{field_path}",
+        )
         extracted = self._parse_field_response(response)
 
         items = extracted.get("items")
@@ -270,16 +276,33 @@ class TemplateAASExtractor:
 
         return "\n\n".join(context_blocks[:8])  # limit context size
 
-    def _query_llm(self, prompt: str) -> str:
+    def _query_llm(self, prompt: str, *, phase: str, label: str) -> str:
         max_retries = 4
         retry_delay = 30  # seconds
 
         for attempt in range(max_retries + 1):
+            start_time = time.time()
             try:
                 if self.llm_provider == "gemini":
                     response = self.llm_client.generate_content(
                         prompt,
                         request_options={'timeout': 240}  # 4 minutes timeout
+                    )
+                    usage = getattr(response, "usage_metadata", None)
+                    tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    llm_stats.record_call(
+                        self.llm_provider,
+                        phase=phase,
+                        label=label,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        total_tokens=total_tokens,
+                        metadata={
+                            "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                            "elapsed_ms": elapsed_ms,
+                            "prompt_chars": len(prompt),
+                        },
                     )
                     return response.text
                 elif self.llm_provider == "mistral":
@@ -292,6 +315,22 @@ class TemplateAASExtractor:
                     # Mistral sometimes returns list, ensure it's always a string
                     if isinstance(content, list):
                         content = "\n".join(str(item) for item in content)
+                    usage = getattr(response, "usage", None)
+                    tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    llm_stats.record_call(
+                        self.llm_provider,
+                        phase=phase,
+                        label=label,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                        total_tokens=total_tokens,
+                        metadata={
+                            "model": self.mistral_model,
+                            "elapsed_ms": elapsed_ms,
+                            "prompt_chars": len(prompt),
+                        },
+                    )
                     return str(content)
                 else:
                     raise RuntimeError("Unsupported LLM provider")

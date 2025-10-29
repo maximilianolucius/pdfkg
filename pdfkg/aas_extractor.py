@@ -19,8 +19,11 @@ Submodels:
 
 import json
 import os
+import time
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
+
+from pdfkg import llm_stats
 
 
 def _format_unique_examples(items: List[str], limit: int) -> str:
@@ -283,7 +286,7 @@ Extract and return ONLY valid JSON in this exact format:
 Only include confirmed information. Use null for missing fields.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="DigitalNameplate")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted: Manufacturer={extracted_data.get('ManufacturerName', 'N/A')}")
@@ -340,7 +343,7 @@ Return ONLY valid JSON in this exact format:
 Only include confirmed information. Use null for missing fields.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="TechnicalData")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted technical specifications")
@@ -455,7 +458,7 @@ Return ONLY valid JSON in this exact format:
 Only include confirmed information. Return empty arrays if no data found.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="HandoverDocumentation")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted {len(extracted_data.get('Certifications', []))} certifications")
@@ -505,7 +508,7 @@ Return ONLY valid JSON in this exact format:
 Only include confirmed information. Return empty arrays if no data found.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="MaintenanceRecord")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted maintenance information")
@@ -556,7 +559,7 @@ Return ONLY valid JSON in this exact format:
 Only include confirmed information. Return empty arrays if no data found.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="OperationalData")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted operational data")
@@ -610,7 +613,7 @@ Return ONLY valid JSON in this exact format:
 Only include confirmed information. Return empty arrays if no data found.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="BillOfMaterials")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted {len(extracted_data.get('Components', []))} components")
@@ -662,7 +665,7 @@ Return ONLY valid JSON in this exact format:
 Only include confirmed information.
 """
 
-        llm_response = self._query_llm(prompt)
+        llm_response = self._query_llm(prompt, label="CarbonFootprint")
         extracted_data = self._parse_json_response(llm_response)
 
         print(f"  ✓ Extracted environmental data")
@@ -711,18 +714,53 @@ Only include confirmed information.
 
         return results
 
-    def _query_llm(self, prompt: str) -> str:
+    def _query_llm(self, prompt: str, *, label: str) -> str:
         """Query the LLM and return response text."""
         if self.llm_provider == "gemini":
+            start = time.time()
             response = self.llm_client.generate_content(prompt)
+            usage = getattr(response, "usage_metadata", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='extraction',
+                label=label,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
+            )
             return response.text
 
         elif self.llm_provider == "mistral":
+            start = time.time()
             response = self.llm_client.chat.complete(
                 model=self.mistral_model,
                 messages=[{"role": "user", "content": prompt}]
             )
-            return response.choices[0].message.content
+            usage = getattr(response, "usage", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='extraction',
+                label=label,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": self.mistral_model,
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
+            )
+            content = response.choices[0].message.content
+            if isinstance(content, list):
+                content = "\n".join(str(item) for item in content)
+            return str(content)
 
     def _parse_json_response(self, response_text: str) -> Dict:
         """Parse LLM JSON response."""

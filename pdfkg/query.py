@@ -3,6 +3,7 @@ Question-answering functionality using the knowledge graph and embeddings.
 """
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from pdfkg.embeds import encode_query
+from pdfkg import llm_stats
 
 # Load .env file
 load_dotenv()
@@ -256,7 +258,7 @@ def find_related_nodes(
     return {k: list(v) for k, v in related.items()}
 
 
-def generate_answer_gemini(question: str, context_chunks: list[dict]) -> str:
+def generate_answer_gemini(question: str, context_chunks: list[dict], *, label: str = "qa") -> str:
     """
     Generate answer using Gemini.
 
@@ -304,12 +306,29 @@ Instructions:
 Answer:"""
 
     model = genai.GenerativeModel(model_name)
+    start = time.time()
     response = model.generate_content(prompt)
+    usage = getattr(response, "usage_metadata", None)
+    tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+    llm_stats.record_call(
+        "gemini",
+        phase="qa",
+        label=label,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        total_tokens=total_tokens,
+        metadata={
+            "model": model_name,
+            "elapsed_ms": int((time.time() - start) * 1000),
+            "prompt_chars": len(prompt),
+            "chunks": len(context_chunks),
+        },
+    )
 
     return response.text
 
 
-def generate_answer_mistral(question: str, context_chunks: list[dict]) -> str:
+def generate_answer_mistral(question: str, context_chunks: list[dict], *, label: str = "qa") -> str:
     """
     Generate answer using Mistral AI.
 
@@ -361,6 +380,7 @@ Instructions:
 Answer:"""
 
     # Generate response
+    start = time.time()
     response = client.chat.complete(
         model=model_name,
         messages=[
@@ -371,7 +391,27 @@ Answer:"""
         ],
     )
 
-    return response.choices[0].message.content
+    usage = getattr(response, "usage", None)
+    tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+    llm_stats.record_call(
+        "mistral",
+        phase="qa",
+        label=label,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        total_tokens=total_tokens,
+        metadata={
+            "model": model_name,
+            "elapsed_ms": int((time.time() - start) * 1000),
+            "prompt_chars": len(prompt),
+            "chunks": len(context_chunks),
+        },
+    )
+
+    content = response.choices[0].message.content
+    if isinstance(content, list):
+        content = "\n".join(str(item) for item in content)
+    return str(content)
 
 
 def format_simple_answer(question: str, context_chunks: list[dict]) -> str:
@@ -420,7 +460,6 @@ def answer_question(
     Returns:
         Dict with keys: question, answer, sources, related.
     """
-    import time
     start_time = time.time()
 
     print(f"\nDEBUG QUERY: ========== answer_question START ==========")
@@ -540,11 +579,13 @@ def answer_question(
 
     if llm_provider == "gemini":
         print(f"DEBUG QUERY: Using Gemini for answer generation")
-        answer = generate_answer_gemini(question, chunks)
+        label = "global" if is_global_search else f"pdf:{pdf_slug}"
+        answer = generate_answer_gemini(question, chunks, label=label)
         llm_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     elif llm_provider == "mistral":
         print(f"DEBUG QUERY: Using Mistral for answer generation")
-        answer = generate_answer_mistral(question, chunks)
+        label = "global" if is_global_search else f"pdf:{pdf_slug}"
+        answer = generate_answer_mistral(question, chunks, label=label)
         llm_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
     else:
         print(f"DEBUG QUERY: Using simple answer format (no LLM)")

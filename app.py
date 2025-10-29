@@ -17,6 +17,7 @@ if sys.platform == "darwin":  # macOS
 
 import json
 import os
+import traceback
 
 # Fix FAISS threading issues on macOS
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -26,7 +27,8 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Generator, List
+from typing import Any, Dict, Generator, List, Optional
+from uuid import uuid4
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -170,6 +172,8 @@ except Exception as e:
 
 # Global state
 current_pdf_slug = None
+reset_jobs_lock = threading.Lock()
+reset_jobs: Dict[str, Dict[str, Any]] = {}
 
 AVAILABLE_SUBMODELS = available_submodels()
 SUBMODEL_CHOICES = [(get_template(key).display_name, key) for key in AVAILABLE_SUBMODELS]
@@ -362,14 +366,22 @@ def process_pdf(pdf_files, embed_model: str, max_tokens: int, use_gemini: bool, 
     )
 
 
-def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
+def _perform_reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
     """Wipe project artifacts and rebuild empty ArangoDB/Milvus state."""
     global current_pdf_slug
 
     status_lines = ["### ♻️ Project Reset", ""]
 
+    def update_progress(value: float, desc: str = "") -> None:
+        if progress:
+            try:
+                progress(value, desc=desc)
+            except Exception:
+                # Progress might be exhausted (e.g., when called outside Gradio)
+                pass
+
     # 1. Clear local output directory
-    progress(0.1, desc="Clearing data/output/")
+    update_progress(0.1, desc="Clearing data/output/")
     output_dir = Path("data/output")
     try:
         if output_dir.exists():
@@ -390,7 +402,7 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         system_logger.log(error_msg, "ERROR")
 
     # 2. Reset ArangoDB database
-    progress(0.4, desc="Resetting ArangoDB")
+    update_progress(0.4, desc="Resetting ArangoDB")
     arango_reset_ok = False
     if hasattr(storage, "db_client"):
         try:
@@ -407,7 +419,7 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         system_logger.log("Reset skipped: storage backend lacks ArangoDB client", "WARNING")
 
     # 3. Reset Milvus collection
-    progress(0.7, desc="Resetting Milvus")
+    update_progress(0.7, desc="Resetting Milvus")
     if hasattr(storage, "milvus_client") and storage.milvus_client:
         try:
             default_dim = os.getenv("DEFAULT_EMBED_DIM")
@@ -424,7 +436,7 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         system_logger.log("Reset skipped: Milvus client unavailable", "WARNING")
 
     # 4. Re-ingest PDFs from data/input
-    progress(0.85, desc="Reprocessing data/input/")
+    update_progress(0.85, desc="Reprocessing data/input/")
     ingest_processed = ingest_cached = ingest_failed = 0
     ingest_errors = []
     try:
@@ -473,7 +485,7 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         status_lines.append(f"- ❌ Failed to reprocess data/input/: {exc}")
         system_logger.log(f"Failed to reprocess data/input/: {exc}", "ERROR")
 
-    progress(1.0, desc="Reset complete")
+    update_progress(1.0, desc="Reset complete")
 
     pdf_list = storage.list_pdfs()
 
@@ -505,6 +517,162 @@ def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
         selected_slug,
         chatbot_update,
         chat_row_update,
+    )
+
+
+def _build_reset_failure_response(error_message: str) -> tuple:
+    """Create a fallback tuple matching reset outputs when something fails early."""
+    status_lines = [
+        "### ♻️ Project Reset",
+        "",
+        f"- ❌ Reset failed: {error_message}",
+        "- Revisa los logs para más detalles.",
+    ]
+    status_message = "\n".join(status_lines)
+
+    dropdown_update = load_available_pdfs()
+    pdf_list = storage.list_pdfs()
+    selected_slug = pdf_list[0]['slug'] if pdf_list else None
+    has_pdfs = bool(pdf_list)
+    chatbot_update = gr.update(value=[], visible=has_pdfs)
+    chat_row_update = gr.update(visible=has_pdfs)
+
+    return (
+        status_message,
+        dropdown_update,
+        selected_slug,
+        chatbot_update,
+        chat_row_update,
+    )
+
+
+def _run_reset_job(job_id: str) -> None:
+    """Execute the reset pipeline in a background thread."""
+    system_logger.log(f"Reset job {job_id} started", "INFO")
+    try:
+        result = _perform_reset_project_data(progress=None)
+        job_status = "completed"
+        system_logger.log(f"Reset job {job_id} completed", "INFO")
+    except Exception as exc:
+        job_status = "failed"
+        error_message = f"{exc}"
+        system_logger.log(f"Reset job {job_id} failed: {error_message}", "ERROR")
+        system_logger.log(traceback.format_exc(), "ERROR")
+        result = _build_reset_failure_response(error_message)
+
+    with reset_jobs_lock:
+        job_entry = reset_jobs.get(job_id)
+        if job_entry is not None:
+            job_entry["status"] = job_status
+            job_entry["result"] = result
+
+
+def _get_active_reset_job() -> Optional[str]:
+    """Return the ID of a running reset job if any."""
+    with reset_jobs_lock:
+        for job_id, details in reset_jobs.items():
+            if details.get("status") == "running":
+                return job_id
+    return None
+
+
+def reset_project_data(progress=gr.Progress(track_tqdm=False)) -> tuple:
+    """
+    Trigger the reset in background and immediately return control to the UI.
+
+    Returns the status message, dropdown updates (no-op initially), chatbot visibility,
+    and the job identifier stored in state for polling.
+    """
+    active_job = _get_active_reset_job()
+    if active_job:
+        message = (
+            "### ♻️ Project Reset\n\n"
+            f"- ⏳ Ya hay un reset ejecutándose (ID: `{active_job}`).\n"
+            "- Revisa la pestaña **System Logs** para seguir el progreso."
+        )
+        return (
+            message,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            active_job,
+        )
+
+    job_id = str(uuid4())
+    with reset_jobs_lock:
+        reset_jobs[job_id] = {"status": "running", "result": None}
+
+    system_logger.log(f"Reset job {job_id} enqueued", "INFO")
+    thread = threading.Thread(target=_run_reset_job, args=(job_id,), daemon=True)
+    thread.start()
+
+    message = (
+        "### ♻️ Project Reset\n\n"
+        "- ⏳ Reset iniciado en background.\n"
+        f"- Job ID: `{job_id}`\n"
+        "- Consulta la pestaña **System Logs** para ver el avance."
+    )
+    return (
+        message,
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        job_id,
+    )
+
+
+def poll_reset_job(job_id: Optional[str]):
+    """
+    Poll the status of a background reset job and emit UI updates when it finishes.
+    """
+    if not job_id:
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            None,
+        )
+
+    with reset_jobs_lock:
+        job = reset_jobs.get(job_id)
+
+    if not job:
+        # Job disappeared (possibly reclaimed); clear state without changes.
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            None,
+        )
+
+    if job.get("status") in {"completed", "failed"} and job.get("result"):
+        result = job["result"]
+        with reset_jobs_lock:
+            reset_jobs.pop(job_id, None)
+        status_message, dropdown_update, selected_slug, chatbot_update, chat_row_update = result
+        return (
+            status_message,
+            dropdown_update,
+            selected_slug,
+            chatbot_update,
+            chat_row_update,
+            None,
+        )
+
+    # Still running
+    return (
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        job_id,
     )
 
 
@@ -1474,6 +1642,8 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                         size="md"
                     )
 
+                    reset_poll_timer = gr.Timer(value=1.0, render=False)
+
                     gr.Markdown(
                         "⚠️ **Dangerous:** Clears `data/output/` and rebuilds the pdfkg database in ArangoDB and Milvus.",
                         elem_id="reset-warning"
@@ -1661,9 +1831,10 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                 show_copy_button=True
             )
 
-            logs_refresh_timer = gr.Timer(value=5.0, render=False)
+            logs_refresh_timer = gr.Timer(value=1.0, render=False)
 
     submodel_state = gr.State({})
+    reset_job_state = gr.State(None)
 
     # ================================
     # EVENT HANDLERS - Tab 1 (Ingestion)
@@ -1676,7 +1847,13 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
 
     reset_btn.click(
         fn=reset_project_data,
-        outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row]
+        outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row, reset_job_state]
+    )
+
+    reset_poll_timer.tick(
+        fn=poll_reset_job,
+        inputs=reset_job_state,
+        outputs=[status_output, pdf_selector, pdf_selector, chatbot, chat_input_row, reset_job_state]
     )
 
     # ============================

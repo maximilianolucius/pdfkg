@@ -16,6 +16,7 @@ AAS v5.0 Submodels:
 
 import json
 import os
+import time
 from typing import Dict, List, Optional
 
 from pdfkg import llm_stats
@@ -289,16 +290,46 @@ Only include submodels with confidence >= 0.5.
         """Query the LLM and return response text."""
 
         if self.llm_provider == "gemini":
+            start = time.time()
             response = self.llm_client.generate_content(prompt)
-            llm_stats.record_call(self.llm_provider, 'classification', 'global')
+            usage = getattr(response, "usage_metadata", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='classification',
+                label='global',
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
+            )
             return response.text
 
         elif self.llm_provider == "mistral":
+            start = time.time()
             response = self.llm_client.chat.complete(
                 model=self.mistral_model,
                 messages=[{"role": "user", "content": prompt}]
             )
-            llm_stats.record_call(self.llm_provider, 'classification', 'global')
+            usage = getattr(response, "usage", None)
+            tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+            llm_stats.record_call(
+                self.llm_provider,
+                phase='classification',
+                label='global',
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                total_tokens=total_tokens,
+                metadata={
+                    "model": self.mistral_model,
+                    "elapsed_ms": int((time.time() - start) * 1000),
+                    "prompt_chars": len(prompt),
+                },
+            )
             return response.choices[0].message.content
 
     def _parse_llm_response(self, response_text: str, pdf_slug: str, filename: str) -> Dict:

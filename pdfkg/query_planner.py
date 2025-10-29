@@ -7,6 +7,7 @@ execution plan that can be executed by the query orchestrator.
 
 import json
 import os
+import time
 from typing import Dict, Any
 
 from pdfkg import llm_stats
@@ -71,8 +72,23 @@ def generate_query_plan(user_question: str) -> Dict[str, Any]:
     prompt = _build_planner_prompt(user_question)
 
     try:
+        start = time.time()
         response = llm_client.generate_content(prompt)
-        llm_stats.record_call("gemini-flash", "planning", "query_planner")
+        usage = getattr(response, "usage_metadata", None)
+        tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
+        llm_stats.record_call(
+            "gemini-flash",
+            "planning",
+            "query_planner",
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            total_tokens=total_tokens,
+            metadata={
+                "model": getattr(llm_client, "model_name", "gemini-2.5-flash"),
+                "elapsed_ms": int((time.time() - start) * 1000),
+                "prompt_chars": len(prompt),
+            },
+        )
         response_text = response.text
 
         # Clean and parse the JSON response
@@ -115,4 +131,3 @@ def generate_query_plan(user_question: str) -> Dict[str, Any]:
                 }
             ]
         }
-
