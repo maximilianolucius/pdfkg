@@ -6,10 +6,15 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import logging
 
 from pdfkg.submodel_templates import get_template, list_submodel_templates
 from pdfkg import llm_stats
+
+logger = logging.getLogger(__name__)
 
 try:
     import google.generativeai as genai
@@ -77,6 +82,11 @@ class TemplateAASExtractor:
             self.mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}")
+
+        self.curated_blocks: Dict[str, List[str]] = {}
+        self.block_fields: Dict[str, List[str]] = {}
+        self.curated_dir = Path("data/input/curated")
+        self.curated_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     def extract(self, submodels: Iterable[str], progress_callback=None) -> Dict[str, ExtractionResult]:
@@ -148,7 +158,8 @@ class TemplateAASExtractor:
     def _extract_field(self, submodel: str, path: List[str], pdf_slugs: List[str]) -> FieldExtraction:
         field_path = ".".join(path)
         field_label = path[-1] if path else submodel
-        evidence = self._collect_field_evidence(field_path, pdf_slugs)
+        self._register_field(submodel, field_path)
+        evidence = self._collect_field_evidence(submodel, field_path, pdf_slugs)
         prompt = self._build_field_prompt(submodel, field_path, field_label, evidence)
         response = self._query_llm(
             prompt,
@@ -166,7 +177,8 @@ class TemplateAASExtractor:
 
     def _extract_list_field(self, submodel: str, path: List[str], item_schema: Any, pdf_slugs: List[str]) -> FieldExtraction:
         field_path = ".".join(path) + "[]"
-        evidence = self._collect_field_evidence(".".join(path), pdf_slugs, max_snippets=8)
+        self._register_field(submodel, ".".join(path))
+        evidence = self._collect_field_evidence(submodel, ".".join(path), pdf_slugs, max_snippets=8)
         template_json = json.dumps(item_schema, indent=2) if item_schema is not None else "null"
         prompt = self._build_list_prompt(submodel, field_path, template_json, evidence)
         response = self._query_llm(
@@ -186,10 +198,52 @@ class TemplateAASExtractor:
         return FieldExtraction(path=field_path, value=items, confidence=confidence, sources=sources, notes=notes)
 
     # ------------------------------------------------------------------
-    def _collect_field_evidence(self, field_path: str, pdf_slugs: List[str], max_snippets: int = 5) -> List[str]:
-        tokens = [token for token in field_path.replace('.', ' ').replace('_', ' ').lower().split() if len(token) > 2]
+    def _collect_field_evidence(
+        self,
+        submodel: str,
+        field_path: str,
+        pdf_slugs: List[str],
+        max_snippets: int = 5,
+    ) -> List[str]:
+        block_id = self._block_identifier(submodel, field_path)
+        curated = self._get_curated_block(block_id, pdf_slugs)
+
+        if curated:
+            snippets = curated[:max_snippets]
+        else:
+            snippets = self._gather_raw_snippets(field_path, pdf_slugs, max_snippets)
+
+        if not snippets:
+            snippets = ["No direct evidence found in documents."]
+
+        return snippets[:max_snippets]
+
+    def _register_field(self, submodel: str, field_path: str) -> None:
+        block_id = self._block_identifier(submodel, field_path)
+        self.block_fields.setdefault(block_id, [])
+        clean_path = field_path.rstrip(".")
+        if clean_path and clean_path not in self.block_fields[block_id]:
+            self.block_fields[block_id].append(clean_path)
+
+    @staticmethod
+    def _block_identifier(submodel: str, field_path: str) -> str:
+        path = field_path.replace("[]", "")
+        root = path.split(".", 1)[0] if path else submodel
+        return f"{submodel}:{root}"
+
+    def _gather_raw_snippets(
+        self,
+        field_path: str,
+        pdf_slugs: List[str],
+        max_snippets: int = 5,
+        token_override: Optional[List[str]] = None,
+    ) -> List[str]:
+        tokens = token_override or [
+            token for token in field_path.replace('.', ' ').replace('_', ' ').lower().split() if len(token) > 2
+        ]
         snippets: List[str] = []
         seen: set[str] = set()
+        max_candidates = max(max_snippets * 4, max_snippets)
 
         for slug in pdf_slugs:
             pdf_info = self.storage.get_pdf_metadata(slug) or {}
@@ -207,7 +261,7 @@ class TemplateAASExtractor:
                     continue
                 snippets.append(snippet)
                 seen.add(snippet)
-                if len(snippets) >= max_snippets:
+                if len(snippets) >= max_candidates:
                     return snippets
 
         if not snippets:
@@ -216,13 +270,81 @@ class TemplateAASExtractor:
                 block = block.strip()
                 if block:
                     snippets.append(block)
-                if len(snippets) >= max_snippets:
+                if len(snippets) >= max_candidates:
                     break
 
-        if not snippets:
-            snippets = ["No direct evidence found in documents."]
+        return snippets
 
-        return snippets[:max_snippets]
+    def _get_curated_block(self, block_id: str, pdf_slugs: List[str]) -> List[str]:
+        if block_id in self.curated_blocks:
+            return self.curated_blocks[block_id]
+
+        tokens: List[str] = []
+        for field in self.block_fields.get(block_id, []):
+            tokens.extend(
+                token for token in field.replace('.', ' ').replace('_', ' ').lower().split() if len(token) > 2
+            )
+        tokens = list(dict.fromkeys(tokens))
+
+        block_name = block_id.split(":", 1)[1] if ":" in block_id else block_id
+        raw_snippets = self._gather_raw_snippets(
+            field_path=block_name,
+            pdf_slugs=pdf_slugs,
+            max_snippets=15,
+            token_override=tokens or None,
+        )
+
+        if not raw_snippets:
+            self.curated_blocks[block_id] = []
+            return []
+
+        submodel = block_id.split(":", 1)[0] if ":" in block_id else "submodel"
+        joined_raw = "\n".join(raw_snippets[:30])
+        prompt = (
+            f"You are curating evidence for the '{block_name}' section of the {submodel} submodel.\n"
+            "From the raw text below, keep only concise paragraphs that contain concrete facts, measurements, "
+            "lists of relevant components, maintenance steps, or other data that could fill structured fields. "
+            "Remove boilerplate, tables, duplicate entries, and generic statements.\n"
+            "Return the filtered content as plain text paragraphs separated by blank lines. "
+            "If nothing relevant remains, return exactly 'NO_DATA'.\n\n"
+            "RAW TEXT:\n"
+            "```text\n"
+            f"{joined_raw}\n"
+            "```"
+        )
+
+        try:
+            curated_text = self._query_llm(
+                prompt,
+                phase="curation",
+                label=block_id,
+            )
+        except Exception as exc:
+            logger.warning("Curation failed for block %s: %s", block_id, exc)
+            curated_text = ""
+
+        curated_snippets: List[str] = []
+        if curated_text:
+            cleaned = curated_text.strip()
+            if cleaned.upper().startswith("NO_DATA"):
+                curated_snippets = []
+            else:
+                parts = [part.strip() for part in cleaned.split("\n\n") if part.strip()]
+                if not parts:
+                    parts = [line.strip() for line in cleaned.splitlines() if line.strip()]
+                curated_snippets = parts
+
+        if not curated_snippets:
+            curated_snippets = raw_snippets[:10]
+        else:
+            output_path = self.curated_dir / f"{block_id.replace(':', '_')}.txt"
+            try:
+                output_path.write_text("\n\n".join(curated_snippets), encoding="utf-8")
+            except Exception as exc:
+                logger.warning("Failed to write curated evidence for %s: %s", block_id, exc)
+
+        self.curated_blocks[block_id] = curated_snippets
+        return curated_snippets
 
     def _format_snippet(self, filename: str, chunk: Dict[str, Any], text: str) -> str:
         page = chunk.get("page")
