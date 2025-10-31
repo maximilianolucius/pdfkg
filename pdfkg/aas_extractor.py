@@ -20,10 +20,13 @@ Submodels:
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 
 from pdfkg import llm_stats
+from pdfkg.llm.config import resolve_llm_provider
+from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 
 
 def _format_unique_examples(items: List[str], limit: int) -> str:
@@ -54,7 +57,7 @@ class AASDataExtractor:
     Extract structured data for AAS submodels from classified PDFs.
     """
 
-    def __init__(self, storage, llm_provider: str = "gemini"):
+    def __init__(self, storage, llm_provider: Optional[str] = None):
         """
         Initialize AAS Data Extractor.
 
@@ -63,7 +66,8 @@ class AASDataExtractor:
             llm_provider: LLM provider ("gemini" or "mistral")
         """
         self.storage = storage
-        self.llm_provider = llm_provider.lower()
+        self.llm_provider = resolve_llm_provider(llm_provider)
+        self.max_workers = max(1, int(os.getenv("AAS_EXTRACTION_CONCURRENCY", "3")))
 
         # Initialize LLM client
         if self.llm_provider == "gemini":
@@ -75,6 +79,7 @@ class AASDataExtractor:
             genai.configure(api_key=api_key)
             model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
+            self.gemini_model = model_name
             print(f"✅ Initialized Gemini model: {model_name}")
 
         elif self.llm_provider == "mistral":
@@ -83,8 +88,7 @@ class AASDataExtractor:
             api_key = os.getenv("MISTRAL_API_KEY")
             if not api_key:
                 raise ValueError("MISTRAL_API_KEY not found in environment")
-            self.llm_client = Mistral(api_key=api_key)
-            self.mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+            self.mistral_model = get_mistral_model_name()
             print(f"✅ Initialized Mistral model: {self.mistral_model}")
 
         else:
@@ -114,78 +118,43 @@ class AASDataExtractor:
 
         # Extract data for each submodel
         submodel_data = {}
+        extraction_functions = {
+            "DigitalNameplate": self._extract_digital_nameplate,
+            "TechnicalData": self._extract_technical_data,
+            "Documentation": self._extract_documentation,
+            "HandoverDocumentation": self._extract_handover_documentation,
+            "MaintenanceRecord": self._extract_maintenance_record,
+            "OperationalData": self._extract_operational_data,
+            "BillOfMaterials": self._extract_bill_of_materials,
+            "CarbonFootprint": self._extract_carbon_footprint,
+        }
 
-        # 2.1: DigitalNameplate
-        if "DigitalNameplate" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: DigitalNameplate")
-            print("-" * 80)
-            submodel_data["DigitalNameplate"] = self._extract_digital_nameplate(
-                pdfs_by_submodel["DigitalNameplate"]
-            )
+        print(f"⚙️  Concurrency: {self.max_workers} worker(s)")
 
-        # 2.2: TechnicalData
-        if "TechnicalData" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: TechnicalData")
-            print("-" * 80)
-            submodel_data["TechnicalData"] = self._extract_technical_data(
-                pdfs_by_submodel["TechnicalData"]
-            )
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {}
 
-        # 2.3: Documentation
-        if "Documentation" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: Documentation")
-            print("-" * 80)
-            submodel_data["Documentation"] = self._extract_documentation(
-                pdfs_by_submodel["Documentation"]
-            )
+            for submodel_key, extractor in extraction_functions.items():
+                if submodel_key not in pdfs_by_submodel:
+                    continue
 
-        # 2.4: HandoverDocumentation
-        if "HandoverDocumentation" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: HandoverDocumentation")
-            print("-" * 80)
-            submodel_data["HandoverDocumentation"] = self._extract_handover_documentation(
-                pdfs_by_submodel["HandoverDocumentation"]
-            )
+                pdf_list = pdfs_by_submodel[submodel_key]
+                future = executor.submit(
+                    self._run_submodel_extraction,
+                    submodel_key,
+                    extractor,
+                    pdf_list,
+                )
+                future_map[future] = submodel_key
 
-        # 2.5: MaintenanceRecord
-        if "MaintenanceRecord" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: MaintenanceRecord")
-            print("-" * 80)
-            submodel_data["MaintenanceRecord"] = self._extract_maintenance_record(
-                pdfs_by_submodel["MaintenanceRecord"]
-            )
+            for future in as_completed(future_map):
+                submodel_key = future_map[future]
 
-        # 2.6: OperationalData
-        if "OperationalData" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: OperationalData")
-            print("-" * 80)
-            submodel_data["OperationalData"] = self._extract_operational_data(
-                pdfs_by_submodel["OperationalData"]
-            )
-
-        # 2.7: BillOfMaterials
-        if "BillOfMaterials" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: BillOfMaterials")
-            print("-" * 80)
-            submodel_data["BillOfMaterials"] = self._extract_bill_of_materials(
-                pdfs_by_submodel["BillOfMaterials"]
-            )
-
-        # 2.8: CarbonFootprint
-        if "CarbonFootprint" in pdfs_by_submodel:
-            print("\n" + "-" * 80)
-            print("Extracting: CarbonFootprint")
-            print("-" * 80)
-            submodel_data["CarbonFootprint"] = self._extract_carbon_footprint(
-                pdfs_by_submodel["CarbonFootprint"]
-            )
+                try:
+                    result = future.result()
+                    submodel_data[submodel_key] = result
+                except Exception as exc:
+                    print(f"  ❌ Extraction failed for {submodel_key}: {exc}")
 
         # Save to storage
         self.storage.db_client.save_metadata('__global__', 'aas_extracted_data', submodel_data)
@@ -196,6 +165,13 @@ class AASDataExtractor:
         print("=" * 80)
 
         return submodel_data
+
+    def _run_submodel_extraction(self, submodel_key: str, extractor_fn, pdf_list: List[str]) -> Any:
+        """Run a submodel extraction function with logging."""
+        print("\n" + "-" * 80)
+        print(f"Extracting: {submodel_key}")
+        print("-" * 80)
+        return extractor_fn(pdf_list)
 
     def _organize_pdfs_by_submodel(self, classifications: Dict) -> Dict[str, List[str]]:
         """Organize PDF slugs by their assigned submodels."""
@@ -729,7 +705,7 @@ Only include confirmed information.
                 tokens_out=tokens_out,
                 total_tokens=total_tokens,
                 metadata={
-                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "model": getattr(self.llm_client, "model_name", getattr(self, "gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))),
                     "elapsed_ms": int((time.time() - start) * 1000),
                     "prompt_chars": len(prompt),
                 },
@@ -738,9 +714,9 @@ Only include confirmed information.
 
         elif self.llm_provider == "mistral":
             start = time.time()
-            response = self.llm_client.chat.complete(
+            response = mistral_chat(
+                messages=[{"role": "user", "content": prompt}],
                 model=self.mistral_model,
-                messages=[{"role": "user", "content": prompt}]
             )
             usage = getattr(response, "usage", None)
             tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
@@ -780,7 +756,7 @@ Only include confirmed information.
             return {}
 
 
-def extract_aas_data(storage, llm_provider: str = "gemini") -> Dict[str, Any]:
+def extract_aas_data(storage, llm_provider: Optional[str] = None) -> Dict[str, Any]:
     """
     Extract AAS submodel data from all classified PDFs.
 

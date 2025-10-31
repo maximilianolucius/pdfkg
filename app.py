@@ -15,9 +15,12 @@ if sys.platform == "darwin":  # macOS
     except RuntimeError:
         pass
 
+import html
 import json
 import os
 import traceback
+import time
+import xml.etree.ElementTree as ET
 
 # Fix FAISS threading issues on macOS
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -30,11 +33,23 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 from uuid import uuid4
 
+from pdfkg.llm.config import (
+    get_default_llm_provider,
+    is_provider_configured,
+    resolve_llm_provider,
+    SUPPORTED_LLM_PROVIDERS,
+)
 import gradio as gr
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+DEFAULT_LLM_PROVIDER = get_default_llm_provider()
+PROVIDER_API_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
+DEFAULT_XML_PREVIEW = "<em>No AAS XML generated yet.</em>"
 
 # Import pipeline modules
 from pdfkg.query import answer_question
@@ -701,6 +716,52 @@ def format_metadata_display(metadata: Dict[str, Dict[str, Any]]) -> str:
     return '\n'.join(lines)
 
 
+def _render_xml_element(elem: ET.Element, depth: int = 0) -> str:
+    """Render an XML element to nested <details> HTML."""
+    tag = elem.tag.split('}', 1)[-1] if '}' in elem.tag else elem.tag
+    attrs = " ".join(f'{k}="{v}"' for k, v in elem.attrib.items())
+    summary_parts = [tag]
+    if attrs:
+        summary_parts.append(f"[{attrs}]")
+    summary = " ".join(summary_parts)
+
+    children_html = "".join(_render_xml_element(child, depth + 1) for child in list(elem))
+    text = (elem.text or "").strip()
+    text_html = f"<div class='xml-text'>{html.escape(text)}</div>" if text else ""
+
+    if children_html or text_html:
+        open_attr = " open" if depth == 0 else ""
+        return (
+            f"<details{open_attr}>"
+            f"<summary>{html.escape(summary)}</summary>"
+            f"{text_html}{children_html}"
+            f"</details>"
+        )
+    return f"<div class='xml-leaf'><span class='xml-tag'>{html.escape(summary)}</span></div>"
+
+
+def build_collapsible_xml_preview(xml_text: str) -> str:
+    """Convert raw XML text into a collapsible HTML tree using <details> blocks."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return f"<pre class='xml-preview-raw'>{html.escape(xml_text)}</pre>"
+
+    style_block = """
+<style>
+.xml-preview details { margin-left: 1rem; }
+.xml-preview summary { cursor: pointer; font-weight: 600; font-family: "Roboto Mono", monospace; }
+.xml-preview .xml-text { margin-left: 1.5rem; font-family: "Roboto Mono", monospace; white-space: pre-wrap; }
+.xml-preview .xml-leaf { margin-left: 1.5rem; font-family: "Roboto Mono", monospace; }
+.xml-preview .xml-tag { font-weight: 600; }
+.xml-preview-raw { background: #111; color: #f0f0f0; padding: 1rem; border-radius: 6px; font-family: "Roboto Mono", monospace; white-space: pre-wrap; }
+</style>
+""".strip()
+
+    body_html = _render_xml_element(root)
+    return f"{style_block}\n<div class='xml-preview'>{body_html}</div>"
+
+
 def extract_submodels_handler(selected_submodels, llm_provider, state, progress=gr.Progress(track_tqdm=True)):
     state = dict(state or {})
     selected_submodels = selected_submodels or []
@@ -709,6 +770,7 @@ def extract_submodels_handler(selected_submodels, llm_provider, state, progress=
     metadata_updates: List[Any] = []
     accordion_updates: List[Any] = []
     status_lines: List[str] = []
+    preview_reset = gr.update(value=DEFAULT_XML_PREVIEW, visible=True)
 
     if not selected_submodels:
         status_lines.append('Select at least one submodel to extract.')
@@ -717,7 +779,34 @@ def extract_submodels_handler(selected_submodels, llm_provider, state, progress=
             metadata_updates.append(gr.update(visible=False))
             accordion_updates.append(gr.update(visible=False))
         download_update = gr.update(value=None, visible=False)
-        return '\n'.join(status_lines), state, download_update, *editor_updates, *metadata_updates, *accordion_updates
+        return '\n'.join(status_lines), state, download_update, preview_reset, *editor_updates, *metadata_updates, *accordion_updates
+
+    try:
+        llm_provider = resolve_llm_provider(llm_provider)
+    except ValueError as exc:
+        message = f"Invalid LLM provider: {exc}"
+        status_lines.append(message)
+        system_logger.log(message, 'ERROR')
+        for key in SUBMODEL_EDITOR_ORDER:
+            is_selected = key in selected_submodels
+            editor_updates.append(gr.update(visible=is_selected))
+            metadata_updates.append(gr.update(visible=is_selected))
+            accordion_updates.append(gr.update(visible=is_selected))
+        download_update = gr.update(value=None, visible=False)
+        return '\n'.join(status_lines), state, download_update, preview_reset, *editor_updates, *metadata_updates, *accordion_updates
+
+    if not is_provider_configured(llm_provider):
+        env_var = PROVIDER_API_ENV[llm_provider]
+        message = f"❌ **Error:** {env_var} not configured. Set it in your .env file."
+        status_lines.append(message)
+        system_logger.log(message, 'ERROR')
+        for key in SUBMODEL_EDITOR_ORDER:
+            is_selected = key in selected_submodels
+            editor_updates.append(gr.update(visible=is_selected))
+            metadata_updates.append(gr.update(visible=is_selected))
+            accordion_updates.append(gr.update(visible=is_selected))
+        download_update = gr.update(value=None, visible=False)
+        return '\n'.join(status_lines), state, download_update, preview_reset, *editor_updates, *metadata_updates, *accordion_updates
 
     try:
         system_logger.log(f"Extracting submodels: {', '.join(selected_submodels)}", 'INFO')
@@ -755,7 +844,7 @@ def extract_submodels_handler(selected_submodels, llm_provider, state, progress=
             metadata_updates.append(gr.update(visible=is_selected))
             accordion_updates.append(gr.update(visible=is_selected))
         download_update = gr.update(value=None, visible=False)
-        return '\n'.join(status_lines), state, download_update, *editor_updates, *metadata_updates, *accordion_updates
+        return '\n'.join(status_lines), state, download_update, preview_reset, *editor_updates, *metadata_updates, *accordion_updates
 
     for key in SUBMODEL_EDITOR_ORDER:
         entry = state.get(key)
@@ -781,7 +870,7 @@ def extract_submodels_handler(selected_submodels, llm_provider, state, progress=
     status_lines.extend(summary_lines)
 
     download_update = gr.update(value=None, visible=False)
-    return '\n'.join(status_lines), state, download_update, *editor_updates, *metadata_updates, *accordion_updates
+    return '\n'.join(status_lines), state, download_update, preview_reset, *editor_updates, *metadata_updates, *accordion_updates
 
 
 
@@ -797,10 +886,24 @@ def update_submodel_editor(value, state, submodel_key):
 def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.Progress(track_tqdm=True)):
     state = dict(state or {})
     selected_submodels = selected_submodels or []
+    preview_reset = gr.update(value=DEFAULT_XML_PREVIEW, visible=True)
 
     if not selected_submodels:
         message = 'Select at least one submodel before generating the AASX.'
-        return message, gr.update(value=None, visible=False)
+        return message, gr.update(value=None, visible=False), preview_reset
+
+    try:
+        llm_provider = resolve_llm_provider(llm_provider)
+    except ValueError as exc:
+        message = f"Invalid LLM provider: {exc}"
+        system_logger.log(message, 'ERROR')
+        return message, gr.update(value=None, visible=False), preview_reset
+
+    if not is_provider_configured(llm_provider):
+        env_var = PROVIDER_API_ENV[llm_provider]
+        message = f"❌ **Error:** {env_var} not configured. Set it in your .env file."
+        system_logger.log(message, 'ERROR')
+        return message, gr.update(value=None, visible=False), preview_reset
 
     compiled: Dict[str, Any] = {}
     metadata_map: Dict[str, Dict[str, Any]] = {}
@@ -821,12 +924,14 @@ def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.
         except json.JSONDecodeError as exc:
             message = f"Invalid JSON for submodel {get_template(key).display_name}: {exc}"
             system_logger.log(message, 'ERROR')
-            return message, gr.update(value=None, visible=False)
+            return message, gr.update(value=None, visible=False), preview_reset
         metadata_map[key] = entry.get('metadata', {})
 
     if not compiled:
         message = 'No submodel data available. Extract or edit templates first.'
-        return message, gr.update(value=None, visible=False)
+        return message, gr.update(value=None, visible=False), preview_reset
+
+    phase_times: Dict[str, float] = {}
 
     progress(0.5, desc='Generating AAS XML...')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -834,17 +939,20 @@ def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.
     output_dir.mkdir(parents=True, exist_ok=True)
     xml_path = output_dir / f'aas_output_{timestamp}.xml'
 
+    xml_start = time.perf_counter()
     xml_output = generate_aas_xml(
         storage=storage,
         llm_provider=llm_provider,
         output_path=xml_path,
         data=compiled
     )
+    phase_times["XML generation"] = time.perf_counter() - xml_start
+    system_logger.log(f"⏱️ XML generation duration: {phase_times['XML generation']:.2f}s", "INFO")
 
     if not xml_output:
         message = 'XML generation returned no output. Check logs for details.'
         system_logger.log(message, 'ERROR')
-        return message, gr.update(value=None, visible=False)
+        return message, gr.update(value=None, visible=False), preview_reset
 
     progress(1.0, desc='Complete')
     system_logger.log(f'Generated XML at {xml_path}', 'INFO')
@@ -863,9 +971,17 @@ def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.
         status_lines.append(f"\n### {template.display_name}")
         status_lines.append(format_metadata_display(metadata_map.get(key, {})))
 
+    if phase_times:
+        status_lines.append("\n**Timing:**")
+        for label, elapsed in phase_times.items():
+            status_lines.append(f"   - {label}: {elapsed:.2f}s")
+
     status_lines.extend(summary_lines)
 
-    return '\n'.join(status_lines), gr.update(value=str(xml_path), visible=True)
+    preview_html = build_collapsible_xml_preview(xml_output)
+    preview_update = gr.update(value=preview_html, visible=True)
+
+    return '\n'.join(status_lines), gr.update(value=str(xml_path), visible=True), preview_update
 
 
 
@@ -1084,7 +1200,7 @@ def build_cross_document_relationships(storage, similarity_threshold: float = 0.
     print("=" * 80)
 
 
-def classify_aas(llm_provider: str = "gemini"):
+def classify_aas(llm_provider: Optional[str] = None):
     """
     Classify all PDFs in database to AAS submodels (Phase 1).
 
@@ -1099,11 +1215,12 @@ def classify_aas(llm_provider: str = "gemini"):
     print("=" * 80)
 
     try:
+        llm_provider = resolve_llm_provider(llm_provider)
+
         # Check if LLM provider is configured
-        if llm_provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
-            return "❌ **Error:** GEMINI_API_KEY not configured. Set it in your .env file."
-        elif llm_provider == "mistral" and not os.getenv("MISTRAL_API_KEY"):
-            return "❌ **Error:** MISTRAL_API_KEY not configured. Set it in your .env file."
+        if not is_provider_configured(llm_provider):
+            env_var = PROVIDER_API_ENV[llm_provider]
+            return f"❌ **Error:** {env_var} not configured. Set it in your .env file."
 
         # Check if there are PDFs to classify
         pdf_list = storage.list_pdfs()
@@ -1167,7 +1284,7 @@ def classify_aas(llm_provider: str = "gemini"):
         return f"❌ **Error during classification:**\n\n{str(e)}\n\nCheck terminal for full traceback."
 
 
-def extract_aas(llm_provider: str = "gemini"):
+def extract_aas(llm_provider: Optional[str] = None):
     """
     Extract structured AAS data from classified PDFs (Phase 2).
 
@@ -1182,11 +1299,12 @@ def extract_aas(llm_provider: str = "gemini"):
     print("=" * 80)
 
     try:
+        llm_provider = resolve_llm_provider(llm_provider)
+
         # Check if LLM provider is configured
-        if llm_provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
-            return "❌ **Error:** GEMINI_API_KEY not configured. Set it in your .env file."
-        elif llm_provider == "mistral" and not os.getenv("MISTRAL_API_KEY"):
-            return "❌ **Error:** MISTRAL_API_KEY not configured. Set it in your .env file."
+        if not is_provider_configured(llm_provider):
+            env_var = PROVIDER_API_ENV[llm_provider]
+            return f"❌ **Error:** {env_var} not configured. Set it in your .env file."
 
         # Check if classifications exist
         classifications = storage.db_client.get_metadata('__global__', 'aas_classifications')
@@ -1257,7 +1375,7 @@ def extract_aas(llm_provider: str = "gemini"):
         return f"❌ **Error during extraction:**\n\n{str(e)}\n\nCheck terminal for full traceback."
 
 
-def validate_aas(llm_provider: str = "gemini"):
+def validate_aas(llm_provider: Optional[str] = None):
     """
     Validate and complete AAS extracted data (Phase 3).
 
@@ -1272,11 +1390,12 @@ def validate_aas(llm_provider: str = "gemini"):
     print("=" * 80)
 
     try:
+        llm_provider = resolve_llm_provider(llm_provider)
+
         # Check if LLM provider is configured
-        if llm_provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
-            return "❌ **Error:** GEMINI_API_KEY not configured. Set it in your .env file."
-        elif llm_provider == "mistral" and not os.getenv("MISTRAL_API_KEY"):
-            return "❌ **Error:** MISTRAL_API_KEY not configured. Set it in your .env file."
+        if not is_provider_configured(llm_provider):
+            env_var = PROVIDER_API_ENV[llm_provider]
+            return f"❌ **Error:** {env_var} not configured. Set it in your .env file."
 
         # Check if extracted data exists
         extracted_data = storage.db_client.get_metadata('__global__', 'aas_extracted_data')
@@ -1359,7 +1478,7 @@ def validate_aas(llm_provider: str = "gemini"):
         return f"❌ **Error during validation:**\n\n{str(e)}\n\nCheck terminal for full traceback."
 
 
-def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
+def generate_aasx_file(llm_provider: Optional[str] = None, progress=gr.Progress()):
     """
     Generate complete AASX file (4-phase pipeline with progress tracking).
 
@@ -1375,13 +1494,12 @@ def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
     system_logger.log("=" * 80, "INFO")
 
     try:
+        llm_provider = resolve_llm_provider(llm_provider)
+
         # Check if LLM provider is configured
-        if llm_provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
-            error_msg = "❌ **Error:** GEMINI_API_KEY not configured. Set it in your .env file."
-            system_logger.log(error_msg, "ERROR")
-            return error_msg, None
-        elif llm_provider == "mistral" and not os.getenv("MISTRAL_API_KEY"):
-            error_msg = "❌ **Error:** MISTRAL_API_KEY not configured. Set it in your .env file."
+        if not is_provider_configured(llm_provider):
+            env_var = PROVIDER_API_ENV[llm_provider]
+            error_msg = f"❌ **Error:** {env_var} not configured. Set it in your .env file."
             system_logger.log(error_msg, "ERROR")
             return error_msg, None
 
@@ -1394,14 +1512,23 @@ def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
 
         system_logger.log(f"Found {len(pdf_list)} PDFs to process", "INFO")
 
+        phase_times: Dict[str, float] = {}
+
+        def record_phase(label: str, start_time: float) -> None:
+            elapsed = time.perf_counter() - start_time
+            phase_times[label] = elapsed
+            system_logger.log(f"⏱️ {label} duration: {elapsed:.2f}s", "INFO")
+
         # Phase 1: Classification (25% progress)
         progress(0.0, desc="Phase 1: Classifying PDFs to AAS submodels...")
         system_logger.log("📋 Phase 1: Starting PDF classification...", "INFO")
 
+        phase1_start = time.perf_counter()
         classifications = classify_pdfs_to_aas(
             storage=storage,
             llm_provider=llm_provider
         )
+        record_phase("Phase 1 - Classification", phase1_start)
 
         if not classifications:
             error_msg = "⚠️ **Classification failed.** Check logs."
@@ -1415,10 +1542,12 @@ def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
         progress(0.25, desc="Phase 2: Extracting structured AAS data...")
         system_logger.log("📊 Phase 2: Starting data extraction...", "INFO")
 
+        phase2_start = time.perf_counter()
         extracted_data = extract_aas_data(
             storage=storage,
             llm_provider=llm_provider
         )
+        record_phase("Phase 2 - Extraction", phase2_start)
 
         if not extracted_data:
             error_msg = "⚠️ **Extraction failed.** Check logs."
@@ -1432,10 +1561,12 @@ def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
         progress(0.50, desc="Phase 3: Validating and completing data...")
         system_logger.log("✅ Phase 3: Starting validation...", "INFO")
 
+        phase3_start = time.perf_counter()
         completed_data, validation_report = validate_aas_data(
             storage=storage,
             llm_provider=llm_provider
         )
+        record_phase("Phase 3 - Validation", phase3_start)
 
         if not validation_report:
             error_msg = "⚠️ **Validation failed.** Check logs."
@@ -1457,11 +1588,13 @@ def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
         xml_filename = f"aas_output_{timestamp}.xml"
         xml_path = output_dir / xml_filename
 
+        phase4_start = time.perf_counter()
         xml_output = generate_aas_xml(
             storage=storage,
             llm_provider=llm_provider,
             output_path=xml_path
         )
+        record_phase("Phase 4 - XML generation", phase4_start)
 
         if not xml_output:
             error_msg = "⚠️ **XML generation failed.** Check logs."
@@ -1492,6 +1625,11 @@ def generate_aasx_file(llm_provider: str = "gemini", progress=gr.Progress()):
             f"- Submodels: {', '.join(completed_data.keys())}\n",
             "**✅ Download your AAS file using the button below!**"
         ]
+
+        if phase_times:
+            result_parts.append("**Timing:**")
+            for label, elapsed in phase_times.items():
+                result_parts.append(f"- {label}: {elapsed:.2f}s")
 
         system_logger.log("=" * 80, "INFO")
         system_logger.log("✅ AASX FILE GENERATION COMPLETE", "INFO")
@@ -1672,11 +1810,12 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                     gr.Markdown("### 💬 Chat Options")
 
                     # Determine default LLM provider
-                    default_llm = "none"
-                    if os.getenv("GEMINI_API_KEY"):
-                        default_llm = "gemini"
-                    elif os.getenv("MISTRAL_API_KEY"):
-                        default_llm = "mistral"
+                    default_llm = DEFAULT_LLM_PROVIDER if is_provider_configured(DEFAULT_LLM_PROVIDER) else "none"
+                    if default_llm == "none":
+                        if is_provider_configured("gemini"):
+                            default_llm = "gemini"
+                        elif is_provider_configured("mistral"):
+                            default_llm = "mistral"
 
                     llm_provider = gr.Radio(
                         choices=[
@@ -1746,12 +1885,21 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                 with gr.Column(scale=1):
                     gr.Markdown("### ⚙️ Configuration")
 
+                    aasx_default_provider = DEFAULT_LLM_PROVIDER
+                    if aasx_default_provider not in {"gemini", "mistral"}:
+                        aasx_default_provider = "gemini"
+                    if not is_provider_configured(aasx_default_provider):
+                        if aasx_default_provider == "gemini" and is_provider_configured("mistral"):
+                            aasx_default_provider = "mistral"
+                        elif aasx_default_provider == "mistral" and is_provider_configured("gemini"):
+                            aasx_default_provider = "gemini"
+
                     aasx_llm_provider = gr.Radio(
                         choices=[
                             ("Gemini", "gemini"),
                             ("Mistral", "mistral"),
                         ],
-                        value="gemini" if os.getenv("GEMINI_API_KEY") else "mistral",
+                        value=aasx_default_provider,
                         label="LLM Provider",
                         info="Model used for template extraction and XML generation"
                     )
@@ -1781,6 +1929,11 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
                     download_file = gr.File(
                         label="Download AAS File",
                         visible=False
+                    )
+
+                    xml_preview = gr.HTML(
+                        value=DEFAULT_XML_PREVIEW,
+                        label="AAS XML Preview"
                     )
 
                     submodel_editor_components = {}
@@ -1892,7 +2045,7 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
     # ============================
     # EVENT HANDLERS - Tab 3 (AASX)
     # ============================
-    extract_outputs = [submodel_status, submodel_state, download_file]
+    extract_outputs = [submodel_status, submodel_state, download_file, xml_preview]
     extract_outputs.extend([submodel_editor_components[key]['editor'] for key in SUBMODEL_EDITOR_ORDER])
     extract_outputs.extend([submodel_editor_components[key]['metadata'] for key in SUBMODEL_EDITOR_ORDER])
     extract_outputs.extend([submodel_editor_components[key]['accordion'] for key in SUBMODEL_EDITOR_ORDER])
@@ -1914,13 +2067,13 @@ with gr.Blocks(title="PDFKG - PDF Knowledge Graph System", theme=gr.themes.Soft(
     generate_aasx_btn.click(
         fn=generate_selected_aasx,
         inputs=[aasx_llm_provider, submodel_selector, submodel_state],
-        outputs=[submodel_status, download_file]
+        outputs=[submodel_status, download_file, xml_preview]
     )
 
     submodel_selector.change(
-        fn=lambda _: gr.update(value=None, visible=False),
+        fn=lambda _: (gr.update(value=None, visible=False), gr.update(value=DEFAULT_XML_PREVIEW, visible=True)),
         inputs=[submodel_selector],
-        outputs=download_file
+        outputs=[download_file, xml_preview]
     )
 
     # ============================

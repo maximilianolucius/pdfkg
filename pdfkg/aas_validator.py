@@ -18,9 +18,12 @@ If incomplete:
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any, Tuple
 
 from pdfkg import llm_stats
+from pdfkg.llm.config import resolve_llm_provider
+from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 
 # LLM imports
 try:
@@ -63,7 +66,7 @@ class AASValidator:
     Validate and complete AAS extracted data.
     """
 
-    def __init__(self, storage, llm_provider: str = "gemini"):
+    def __init__(self, storage, llm_provider: Optional[str] = None):
         """
         Initialize AAS Validator.
 
@@ -72,7 +75,8 @@ class AASValidator:
             llm_provider: LLM provider ("gemini" or "mistral")
         """
         self.storage = storage
-        self.llm_provider = llm_provider.lower()
+        self.llm_provider = resolve_llm_provider(llm_provider)
+        self.max_workers = max(1, int(os.getenv("AAS_VALIDATION_CONCURRENCY", "3")))
 
         # Initialize LLM client
         if self.llm_provider == "gemini":
@@ -84,6 +88,7 @@ class AASValidator:
             genai.configure(api_key=api_key)
             model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
+            self.gemini_model = model_name
             print(f"✅ Initialized Gemini model: {model_name}")
 
         elif self.llm_provider == "mistral":
@@ -92,8 +97,7 @@ class AASValidator:
             api_key = os.getenv("MISTRAL_API_KEY")
             if not api_key:
                 raise ValueError("MISTRAL_API_KEY not found in environment")
-            self.llm_client = Mistral(api_key=api_key)
-            self.mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+            self.mistral_model = get_mistral_model_name()
             print(f"✅ Initialized Mistral model: {self.mistral_model}")
 
         else:
@@ -117,6 +121,7 @@ class AASValidator:
             return {}, {}
 
         print(f"\n📚 Found data for {len(extracted_data)} submodels")
+        print(f"⚙️  Concurrency: {self.max_workers} worker(s)")
 
         # Validate using LLM
         validation_result = self._validate_with_llm(extracted_data)
@@ -140,18 +145,32 @@ class AASValidator:
         if not is_complete and missing:
             print("\n🔄 Attempting to complete missing data...")
 
-            for missing_item in missing:
-                attempt_result = self._attempt_completion(missing_item, extracted_data)
-                if attempt_result:
-                    completion_attempts.append(attempt_result)
+            print(f"⚙️  Attempt concurrency: {self.max_workers} worker(s)")
 
-                    # Merge completed data
-                    submodel = attempt_result.get('submodel')
-                    data = attempt_result.get('data')
-                    if submodel and data:
-                        if submodel not in completed_data:
-                            completed_data[submodel] = {}
-                        completed_data[submodel].update(data)
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_map = {
+                    executor.submit(self._attempt_completion, missing_item, extracted_data): missing_item
+                    for missing_item in missing
+                }
+
+                for future in as_completed(future_map):
+                    missing_item = future_map[future]
+                    try:
+                        attempt_result = future.result()
+                    except Exception as exc:
+                        print(f"    ⚠️  Completion failed for {missing_item}: {exc}")
+                        continue
+
+                    if attempt_result:
+                        completion_attempts.append(attempt_result)
+
+            for attempt_result in completion_attempts:
+                submodel = attempt_result.get('submodel')
+                data = attempt_result.get('data')
+                if submodel and data:
+                    if submodel not in completed_data:
+                        completed_data[submodel] = {}
+                    completed_data[submodel].update(data)
 
         # Re-validate completed data
         if completion_attempts:
@@ -490,7 +509,7 @@ Return ONLY valid JSON with any relevant data found.
                 tokens_out=tokens_out,
                 total_tokens=total_tokens,
                 metadata={
-                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "model": getattr(self.llm_client, "model_name", getattr(self, "gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))),
                     "elapsed_ms": int((time.time() - start) * 1000),
                     "prompt_chars": len(prompt),
                 },
@@ -499,9 +518,9 @@ Return ONLY valid JSON with any relevant data found.
 
         elif self.llm_provider == "mistral":
             start = time.time()
-            response = self.llm_client.chat.complete(
+            response = mistral_chat(
+                messages=[{"role": "user", "content": prompt}],
                 model=self.mistral_model,
-                messages=[{"role": "user", "content": prompt}]
             )
             usage = getattr(response, "usage", None)
             tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
@@ -518,7 +537,10 @@ Return ONLY valid JSON with any relevant data found.
                     "prompt_chars": len(prompt),
                 },
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if isinstance(content, list):
+                content = "\n".join(str(item) for item in content)
+            return str(content)
 
     def _parse_json_response(self, response_text: str) -> Dict:
         """Parse LLM JSON response."""
@@ -537,7 +559,7 @@ Return ONLY valid JSON with any relevant data found.
             return {}
 
 
-def validate_aas_data(storage, llm_provider: str = "gemini") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def validate_aas_data(storage, llm_provider: Optional[str] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Validate and complete AAS extracted data.
 

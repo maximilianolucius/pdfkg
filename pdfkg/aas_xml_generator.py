@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 from pdfkg import llm_stats
+from pdfkg.llm.config import resolve_llm_provider
+from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 
 # LLM imports
 try:
@@ -55,7 +57,7 @@ class AASXMLGenerator:
     Generate AAS v5.0 XML from validated data.
     """
 
-    def __init__(self, storage, llm_provider: str = "gemini"):
+    def __init__(self, storage, llm_provider: Optional[str] = None):
         """
         Initialize AAS XML Generator.
 
@@ -64,7 +66,7 @@ class AASXMLGenerator:
             llm_provider: LLM provider ("gemini" or "mistral")
         """
         self.storage = storage
-        self.llm_provider = llm_provider.lower()
+        self.llm_provider = resolve_llm_provider(llm_provider)
 
         # Initialize LLM client
         if self.llm_provider == "gemini":
@@ -76,6 +78,7 @@ class AASXMLGenerator:
             genai.configure(api_key=api_key)
             model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
+            self.gemini_model = model_name
             print(f"✅ Initialized Gemini model: {model_name}")
 
         elif self.llm_provider == "mistral":
@@ -84,8 +87,7 @@ class AASXMLGenerator:
             api_key = os.getenv("MISTRAL_API_KEY")
             if not api_key:
                 raise ValueError("MISTRAL_API_KEY not found in environment")
-            self.llm_client = Mistral(api_key=api_key)
-            self.mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+            self.mistral_model = get_mistral_model_name()
             print(f"✅ Initialized Mistral model: {self.mistral_model}")
 
         else:
@@ -398,7 +400,7 @@ Only return the XML, no explanations.
                 tokens_out=tokens_out,
                 total_tokens=total_tokens,
                 metadata={
-                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "model": getattr(self.llm_client, "model_name", getattr(self, "gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))),
                     "elapsed_ms": int((time.time() - start) * 1000),
                     "prompt_chars": len(prompt),
                 },
@@ -407,9 +409,9 @@ Only return the XML, no explanations.
 
         elif self.llm_provider == "mistral":
             start = time.time()
-            response = self.llm_client.chat.complete(
+            response = mistral_chat(
+                messages=[{"role": "user", "content": prompt}],
                 model=self.mistral_model,
-                messages=[{"role": "user", "content": prompt}]
             )
             usage = getattr(response, "usage", None)
             tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
@@ -426,10 +428,13 @@ Only return the XML, no explanations.
                     "prompt_chars": len(prompt),
                 },
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if isinstance(content, list):
+                content = "\n".join(str(item) for item in content)
+            return str(content)
 
 
-def generate_aas_xml(storage, llm_provider: str = "gemini", output_path: Optional[Path] = None, data: Optional[Dict[str, Any]] = None) -> str:
+def generate_aas_xml(storage, llm_provider: Optional[str] = None, output_path: Optional[Path] = None, data: Optional[Dict[str, Any]] = None) -> str:
     """
     Generate AAS v5.0 XML from validated data.
 

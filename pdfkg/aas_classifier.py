@@ -17,9 +17,12 @@ AAS v5.0 Submodels:
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 from pdfkg import llm_stats
+from pdfkg.llm.config import resolve_llm_provider
+from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 from pdfkg.submodel_templates import get_template, list_submodel_templates
 
 # LLM imports
@@ -30,7 +33,7 @@ except ImportError:
     GEMINI_AVAILABLE = False
 
 try:
-    from mistralai import Mistral
+    from mistralai import Mistral  # noqa: F401  # imported for availability check only
     MISTRAL_AVAILABLE = True
 except ImportError:
     MISTRAL_AVAILABLE = False
@@ -66,7 +69,7 @@ class AASClassifier:
     Classifier for mapping PDFs to AAS submodels using LLM analysis.
     """
 
-    def __init__(self, storage, llm_provider: str = "gemini"):
+    def __init__(self, storage, llm_provider: Optional[str] = None):
         """
         Initialize AAS Classifier.
 
@@ -75,7 +78,8 @@ class AASClassifier:
             llm_provider: LLM provider ("gemini" or "mistral")
         """
         self.storage = storage
-        self.llm_provider = llm_provider.lower()
+        self.llm_provider = resolve_llm_provider(llm_provider)
+        self.max_workers = max(1, int(os.getenv("AAS_CLASSIFY_CONCURRENCY", "3")))
 
         # Initialize LLM client
         if self.llm_provider == "gemini":
@@ -87,6 +91,7 @@ class AASClassifier:
             genai.configure(api_key=api_key)
             model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
+            self.gemini_model = model_name
             print(f"✅ Initialized Gemini model: {model_name}")
 
         elif self.llm_provider == "mistral":
@@ -95,8 +100,7 @@ class AASClassifier:
             api_key = os.getenv("MISTRAL_API_KEY")
             if not api_key:
                 raise ValueError("MISTRAL_API_KEY not found in environment")
-            self.llm_client = Mistral(api_key=api_key)
-            self.mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+            self.mistral_model = get_mistral_model_name()
             print(f"✅ Initialized Mistral model: {self.mistral_model}")
 
         else:
@@ -166,29 +170,39 @@ class AASClassifier:
             print("\n⚠️  No PDFs found in database")
             return {}
 
-        print(f"\n📚 Found {len(all_pdfs)} PDFs to classify")
+        total_pdfs = len(all_pdfs)
+        print(f"\n📚 Found {total_pdfs} PDFs to classify")
         print(f"🤖 Using LLM: {self.llm_provider}")
+        print(f"⚙️  Concurrency: {self.max_workers} worker(s)")
 
         classifications = {}
 
-        for i, pdf in enumerate(all_pdfs, 1):
-            slug = pdf['slug']
-            print(f"\n[{i}/{len(all_pdfs)}] Processing: {pdf['filename']}")
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {}
 
-            try:
-                classification = self.classify_pdf(slug)
-                classifications[slug] = classification
+            for index, pdf in enumerate(all_pdfs, 1):
+                slug = pdf['slug']
+                print(f"\n[{index}/{total_pdfs}] Queued: {pdf['filename']}")
+                future = executor.submit(self.classify_pdf, slug)
+                future_map[future] = (slug, pdf['filename'])
 
-            except Exception as e:
-                print(f"  ❌ Error classifying {slug}: {e}")
-                classifications[slug] = {
-                    "pdf_slug": slug,
-                    "filename": pdf['filename'],
-                    "submodels": [],
-                    "confidence_scores": {},
-                    "reasoning": f"Error: {str(e)}",
-                    "error": str(e)
-                }
+            for future in as_completed(future_map):
+                slug, filename = future_map[future]
+
+                try:
+                    classification = future.result()
+                    classifications[slug] = classification
+
+                except Exception as e:
+                    print(f"  ❌ Error classifying {slug}: {e}")
+                    classifications[slug] = {
+                        "pdf_slug": slug,
+                        "filename": filename,
+                        "submodels": [],
+                        "confidence_scores": {},
+                        "reasoning": f"Error: {str(e)}",
+                        "error": str(e)
+                    }
 
         # Save classifications to storage
         self.storage.db_client.save_metadata('__global__', 'aas_classifications', classifications)
@@ -302,7 +316,7 @@ Only include submodels with confidence >= 0.5.
                 tokens_out=tokens_out,
                 total_tokens=total_tokens,
                 metadata={
-                    "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                    "model": getattr(self.llm_client, "model_name", getattr(self, "gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))),
                     "elapsed_ms": int((time.time() - start) * 1000),
                     "prompt_chars": len(prompt),
                 },
@@ -311,9 +325,9 @@ Only include submodels with confidence >= 0.5.
 
         elif self.llm_provider == "mistral":
             start = time.time()
-            response = self.llm_client.chat.complete(
+            response = mistral_chat(
+                messages=[{"role": "user", "content": prompt}],
                 model=self.mistral_model,
-                messages=[{"role": "user", "content": prompt}]
             )
             usage = getattr(response, "usage", None)
             tokens_in, tokens_out, total_tokens = llm_stats.extract_token_usage(usage)
@@ -330,7 +344,10 @@ Only include submodels with confidence >= 0.5.
                     "prompt_chars": len(prompt),
                 },
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if isinstance(content, list):
+                content = "\n".join(str(item) for item in content)
+            return str(content)
 
     def _parse_llm_response(self, response_text: str, pdf_slug: str, filename: str) -> Dict:
         """Parse LLM JSON response."""
@@ -404,7 +421,7 @@ Only include submodels with confidence >= 0.5.
         print("\n" + "=" * 80)
 
 
-def classify_pdfs_to_aas(storage, llm_provider: str = "gemini") -> Dict[str, Dict]:
+def classify_pdfs_to_aas(storage, llm_provider: Optional[str] = None) -> Dict[str, Dict]:
     """
     Classify all PDFs in storage to AAS submodels.
 
@@ -419,7 +436,7 @@ def classify_pdfs_to_aas(storage, llm_provider: str = "gemini") -> Dict[str, Dic
     return classifier.classify_all_pdfs()
 
 
-def classify_single_pdf_submodels(storage, pdf_slug: str, llm_provider: str = "gemini") -> Optional[Dict]:
+def classify_single_pdf_submodels(storage, pdf_slug: str, llm_provider: Optional[str] = None) -> Optional[Dict]:
     """
     Classify a single PDF to AAS submodels without instantiating the full class.
     This is a lightweight version for use during ingestion.

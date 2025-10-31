@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import logging
 
+from pdfkg.llm.config import resolve_llm_provider
+from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 from pdfkg.submodel_templates import get_template, list_submodel_templates
 from pdfkg import llm_stats
 
@@ -59,9 +61,9 @@ class ExtractionResult:
 class TemplateAASExtractor:
     """Extract submodel data using JSON templates as the contract."""
 
-    def __init__(self, storage, llm_provider: str = "gemini") -> None:
+    def __init__(self, storage, llm_provider: Optional[str] = None) -> None:
         self.storage = storage
-        self.llm_provider = llm_provider.lower()
+        self.llm_provider = resolve_llm_provider(llm_provider)
 
         if self.llm_provider == "gemini":
             if not GEMINI_AVAILABLE:
@@ -72,14 +74,14 @@ class TemplateAASExtractor:
             genai.configure(api_key=api_key)
             model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             self.llm_client = genai.GenerativeModel(model_name)
+            self.gemini_model = model_name
         elif self.llm_provider == "mistral":
             if not MISTRAL_AVAILABLE:
                 raise ImportError("mistralai not installed")
             api_key = os.getenv("MISTRAL_API_KEY")
             if not api_key:
                 raise ValueError("MISTRAL_API_KEY not configured")
-            self.llm_client = Mistral(api_key=api_key)
-            self.mistral_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+            self.mistral_model = get_mistral_model_name()
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}")
 
@@ -421,17 +423,17 @@ class TemplateAASExtractor:
                         tokens_out=tokens_out,
                         total_tokens=total_tokens,
                         metadata={
-                            "model": getattr(self.llm_client, "model_name", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+                            "model": getattr(self.llm_client, "model_name", getattr(self, "gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))),
                             "elapsed_ms": elapsed_ms,
                             "prompt_chars": len(prompt),
                         },
                     )
                     return response.text
                 elif self.llm_provider == "mistral":
-                    response = self.llm_client.chat.complete(
-                        model=self.mistral_model,
+                    response = mistral_chat(
                         messages=[{"role": "user", "content": prompt}],
-                        timeout=240  # 4 minutes timeout
+                        model=self.mistral_model,
+                        timeout=240,  # 4 minutes timeout
                     )
                     content = response.choices[0].message.content
                     # Mistral sometimes returns list, ensure it's always a string
@@ -497,7 +499,7 @@ class TemplateAASExtractor:
         return payload
 
 
-def extract_submodels(storage, submodels: Iterable[str], llm_provider: str = "gemini", progress_callback=None) -> Dict[str, Dict[str, Any]]:
+def extract_submodels(storage, submodels: Iterable[str], llm_provider: Optional[str] = None, progress_callback=None) -> Dict[str, Dict[str, Any]]:
     extractor = TemplateAASExtractor(storage=storage, llm_provider=llm_provider)
     raw_results = extractor.extract(submodels, progress_callback=progress_callback)
     prepared: Dict[str, Dict[str, Any]] = {}
