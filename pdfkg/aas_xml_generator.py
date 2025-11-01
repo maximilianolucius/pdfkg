@@ -21,6 +21,7 @@ from pathlib import Path
 from pdfkg import llm_stats
 from pdfkg.llm.config import resolve_llm_provider
 from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
+from pdfkg.template_utils import sanitize_submodel_data
 
 # LLM imports
 try:
@@ -116,6 +117,15 @@ class AASXMLGenerator:
         if not data:
             print("\n❌ No data available for XML generation. Provide data or run previous phases.")
             return ""
+
+        sanitized_data: Dict[str, Any] = {}
+        for key, submodel_data in data.items():
+            try:
+                sanitized_data[key] = sanitize_submodel_data(key, submodel_data)
+            except KeyError:
+                sanitized_data[key] = submodel_data
+
+        data = sanitized_data
 
         print(f"\n📚 Generating XML for {len(data)} submodels")
 

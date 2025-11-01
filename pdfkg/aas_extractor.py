@@ -27,6 +27,8 @@ from collections import defaultdict
 from pdfkg import llm_stats
 from pdfkg.llm.config import resolve_llm_provider
 from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
+from pdfkg.submodel_templates import template_schema
+from pdfkg.template_utils import sanitize_submodel_data
 
 
 def _format_unique_examples(items: List[str], limit: int) -> str:
@@ -209,6 +211,7 @@ class AASDataExtractor:
         products = []
         serials = []
         years = []
+        part_numbers = []
 
         for slug, entity_dict in all_entities.items():
             for chunk_id, entities in entity_dict.items():
@@ -218,12 +221,14 @@ class AASDataExtractor:
 
                     if entity_type == 'manufacturer':
                         manufacturers.append(entity_text)
-                    elif entity_type == 'model_number' or entity_type == 'product':
+                    elif entity_type in ('model_number', 'product'):
                         products.append(entity_text)
                     elif entity_type == 'serial_number':
                         serials.append(entity_text)
                     elif entity_type == 'year':
                         years.append(entity_text)
+                    elif entity_type == 'part_number':
+                        part_numbers.append(entity_text)
 
         # Semantic search for missing data
         search_results = self._semantic_search_all_pdfs(
@@ -238,6 +243,7 @@ class AASDataExtractor:
             context_parts.append(f"[{result['pdf_filename']}] {result['text']}")
 
         context = "\n\n".join(context_parts)
+        template_json = json.dumps(template_schema("DigitalNameplate"), indent=2)
 
         # LLM extraction
         prompt = f"""Extract identification information for this industrial product.
@@ -250,20 +256,44 @@ Entities found:
 - Products: {_format_unique_examples(products, 5)}
 - Serial numbers: {_format_unique_examples(serials, 3)}
 - Years: {_format_unique_examples(years, 3)}
+- Part numbers: {_format_unique_examples(part_numbers, 3)}
 
-Extract and return ONLY valid JSON in this exact format:
-{{
-  "ManufacturerName": "Company name",
-  "ManufacturerProductDesignation": "Product model/designation",
-  "SerialNumber": "Serial number if found, otherwise null",
-  "YearOfConstruction": "Year as integer if found, otherwise null"
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information. Use null for missing fields.
+Instructions:
+- Fill each field with the best-supported value from the evidence above.
+- Use null when information is not confirmed.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="DigitalNameplate")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("DigitalNameplate", extracted_data)
+
+        # Fallbacks using aggregated entities if LLM returned nulls
+        if not extracted_data.get("ManufacturerName"):
+            fallback = next((m for m in manufacturers if m), None)
+            if fallback:
+                extracted_data["ManufacturerName"] = str(fallback).strip()
+        if not extracted_data.get("ManufacturerProductDesignation"):
+            fallback = next((p for p in products if p), None)
+            if fallback:
+                extracted_data["ManufacturerProductDesignation"] = str(fallback).strip()
+        if not extracted_data.get("SerialNumber"):
+            fallback = next((s for s in serials if s), None)
+            if fallback:
+                extracted_data["SerialNumber"] = str(fallback).strip()
+        if not extracted_data.get("YearOfConstruction"):
+            fallback = next((y for y in years if y), None)
+            if fallback:
+                extracted_data["YearOfConstruction"] = str(fallback).strip()
+        if not extracted_data.get("PartNumber"):
+            fallback = next((pn for pn in part_numbers if pn), None)
+            if fallback:
+                extracted_data["PartNumber"] = str(fallback).strip()
 
         print(f"  ✓ Extracted: Manufacturer={extracted_data.get('ManufacturerName', 'N/A')}")
         print(f"             Product={extracted_data.get('ManufacturerProductDesignation', 'N/A')}")
@@ -290,37 +320,29 @@ Only include confirmed information. Use null for missing fields.
 
         context = "\n\n".join(context_parts)
 
+        template_json = json.dumps(template_schema("TechnicalData"), indent=2)
+
         # LLM extraction
-        prompt = f"""Extract technical specifications from these documents.
+        prompt = f"""Extract technical specifications for this product.
 
 Context:
 {context}
 
-Return ONLY valid JSON in this exact format:
-{{
-  "GeneralTechnicalData": {{
-    "ProductArticleNumber": "Article number if found, otherwise null",
-    "Weight": "Weight with unit (e.g., '2.5 kg'), otherwise null",
-    "Dimensions": "Dimensions with units (e.g., '100x50x30 mm'), otherwise null"
-  }},
-  "ElectricalProperties": {{
-    "VoltageRange": "Voltage range (e.g., '100-240 VAC'), otherwise null",
-    "Current": "Current rating (e.g., '10 A'), otherwise null",
-    "Power": "Power rating (e.g., '2.4 kW'), otherwise null",
-    "Frequency": "Frequency (e.g., '50/60 Hz'), otherwise null"
-  }},
-  "MechanicalProperties": {{
-    "IPRating": "IP rating (e.g., 'IP65'), otherwise null",
-    "TemperatureRange": "Operating temperature range (e.g., '-25 to +60°C'), otherwise null",
-    "PressureRange": "Pressure range if applicable, otherwise null"
-  }}
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information. Use null for missing fields.
+Instructions:
+- Populate each field using measurements or identifiers from the context.
+- Include units (e.g., '2.5 kg', '100-240 VAC') when available.
+- Use null when information is not confirmed.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="TechnicalData")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("TechnicalData", extracted_data)
 
         print(f"  ✓ Extracted technical specifications")
 
@@ -362,18 +384,18 @@ Only include confirmed information. Use null for missing fields.
 
             doc_entry = {
                 "Title": pdf_info['filename'],
-                "DocumentType": doc_type,
-                "FilePath": f"/documents/{pdf_info['filename']}",
-                "ContentType": "application/pdf",
+                "Type": doc_type,
                 "Language": language,
-                "Pages": pdf_info['num_pages']
+                "Version": None,
+                "Location": f"/documents/{pdf_info['filename']}",
+                "Notes": None
             }
 
             documents.append(doc_entry)
 
         print(f"  ✓ Mapped {len(documents)} documents")
 
-        return {"Documents": documents}
+        return sanitize_submodel_data("Documentation", {"Documents": documents})
 
     def _extract_handover_documentation(self, pdf_slugs: List[str]) -> Dict:
         """
@@ -405,39 +427,33 @@ Only include confirmed information. Use null for missing fields.
 
         context = "\n\n".join(context_parts)
 
+        template_json = json.dumps(template_schema("HandoverDocumentation"), indent=2)
+
         # LLM extraction
-        prompt = f"""Extract certificate and compliance information.
+        prompt = f"""Extract certificate and declaration information.
 
 Context:
 {context}
 
-Certifications found: {', '.join(all_certs) if all_certs else 'None'}
+Known certifications: {', '.join(sorted(all_certs)) if all_certs else 'None'}
 
-Return ONLY valid JSON in this exact format:
-{{
-  "Certifications": [
-    {{
-      "CertificationType": "Type (e.g., CE, UL, ATEX)",
-      "Issuer": "Issuing organization if mentioned, otherwise null",
-      "CertificateNumber": "Certificate number if found, otherwise null",
-      "IssueDate": "Issue date if found, otherwise null"
-    }}
-  ],
-  "Warranties": [
-    {{
-      "WarrantyPeriod": "Period (e.g., '2 years'), otherwise null",
-      "WarrantyConditions": "Brief conditions if mentioned, otherwise null"
-    }}
-  ]
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information. Return empty arrays if no data found.
+Instructions:
+- Populate certificate and declaration entries using explicit evidence from the context.
+- Use null when information is not confirmed.
+- Leave arrays empty if no data is available.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="HandoverDocumentation")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("HandoverDocumentation", extracted_data)
 
-        print(f"  ✓ Extracted {len(extracted_data.get('Certifications', []))} certifications")
+        print(f"  ✓ Extracted {len(extracted_data.get('Certificates', []))} certificates")
 
         return extracted_data
 
@@ -461,31 +477,29 @@ Only include confirmed information. Return empty arrays if no data found.
 
         context = "\n\n".join(context_parts)
 
+        template_json = json.dumps(template_schema("MaintenanceRecord"), indent=2)
+
         # LLM extraction
-        prompt = f"""Extract maintenance information.
+        prompt = f"""Extract maintenance-related information.
 
 Context:
 {context}
 
-Return ONLY valid JSON in this exact format:
-{{
-  "MaintenanceSchedule": {{
-    "Interval": "Maintenance interval (e.g., 'every 6 months'), otherwise null",
-    "Description": "Brief description of maintenance tasks, otherwise null"
-  }},
-  "SpareParts": [
-    {{
-      "PartName": "Part name",
-      "PartNumber": "Part number if available, otherwise null"
-    }}
-  ]
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information. Return empty arrays if no data found.
+Instructions:
+- Summarize maintenance intervals using concise text.
+- Populate procedure and spare part lists with concrete tasks and references.
+- Use null when information is not confirmed.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="MaintenanceRecord")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("MaintenanceRecord", extracted_data)
 
         print(f"  ✓ Extracted maintenance information")
 
@@ -511,32 +525,28 @@ Only include confirmed information. Return empty arrays if no data found.
 
         context = "\n\n".join(context_parts)
 
+        template_json = json.dumps(template_schema("OperationalData"), indent=2)
+
         # LLM extraction
-        prompt = f"""Extract operational data and parameters.
+        prompt = f"""Summarize operational data for this equipment.
 
 Context:
 {context}
 
-Return ONLY valid JSON in this exact format:
-{{
-  "OperatingConditions": {{
-    "AmbientTemperature": "Ambient temperature range, otherwise null",
-    "Humidity": "Humidity range if specified, otherwise null",
-    "Altitude": "Maximum altitude if specified, otherwise null"
-  }},
-  "OperatingModes": [
-    {{
-      "ModeName": "Mode name",
-      "Description": "Brief description"
-    }}
-  ]
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information. Return empty arrays if no data found.
+Instructions:
+- Provide concise textual descriptions for each field based on the context.
+- Use null when information is not confirmed.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="OperationalData")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("OperationalData", extracted_data)
 
         print(f"  ✓ Extracted operational data")
 
@@ -562,35 +572,28 @@ Only include confirmed information. Return empty arrays if no data found.
 
         context = "\n\n".join(context_parts)
 
+        template_json = json.dumps(template_schema("BillOfMaterials"), indent=2)
+
         # LLM extraction
-        prompt = f"""Extract bill of materials and component information.
+        prompt = f"""Extract bill of materials information.
 
 Context:
 {context}
 
-Return ONLY valid JSON in this exact format:
-{{
-  "Components": [
-    {{
-      "ComponentName": "Component name",
-      "PartNumber": "Part or article number",
-      "Quantity": "Quantity if specified, otherwise null",
-      "IsOptional": false
-    }}
-  ],
-  "Accessories": [
-    {{
-      "AccessoryName": "Accessory name",
-      "PartNumber": "Part number if available, otherwise null"
-    }}
-  ]
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information. Return empty arrays if no data found.
+Instructions:
+- Populate each component entry with the corresponding details found in the context.
+- Use null when information is not confirmed.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="BillOfMaterials")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("BillOfMaterials", extracted_data)
 
         print(f"  ✓ Extracted {len(extracted_data.get('Components', []))} components")
 
@@ -616,33 +619,28 @@ Only include confirmed information. Return empty arrays if no data found.
 
         context = "\n\n".join(context_parts)
 
+        template_json = json.dumps(template_schema("CarbonFootprint"), indent=2)
+
         # LLM extraction
-        prompt = f"""Extract environmental and carbon footprint data.
+        prompt = f"""Extract environmental and carbon footprint information.
 
 Context:
 {context}
 
-Return ONLY valid JSON in this exact format:
-{{
-  "EnergyConsumption": {{
-    "PowerRating": "Power rating (e.g., '2.4 kW'), otherwise null",
-    "EnergyEfficiencyClass": "Efficiency class if specified, otherwise null"
-  }},
-  "Lifecycle": {{
-    "ExpectedLifetime": "Expected lifetime if specified, otherwise null",
-    "DisposalInstructions": "Brief disposal instructions if mentioned, otherwise null"
-  }},
-  "CarbonData": {{
-    "CO2Emissions": "CO2 emissions data if available, otherwise null",
-    "RecyclableContent": "Recyclable content percentage if specified, otherwise null"
-  }}
-}}
+Template JSON (use exactly these keys, no additions):
+```json
+{template_json}
+```
 
-Only include confirmed information.
+Instructions:
+- Populate each field with concise, evidence-backed text (include units where relevant).
+- Use null when information is not confirmed.
+- Do not add new keys or rename existing ones.
 """
 
         llm_response = self._query_llm(prompt, label="CarbonFootprint")
-        extracted_data = self._parse_json_response(llm_response)
+        extracted_data = self._parse_json_response(llm_response) or {}
+        extracted_data = sanitize_submodel_data("CarbonFootprint", extracted_data)
 
         print(f"  ✓ Extracted environmental data")
 

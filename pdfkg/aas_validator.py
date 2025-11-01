@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any, Tuple
 
 from pdfkg import llm_stats
+from pdfkg.template_utils import sanitize_submodel_data
 from pdfkg.llm.config import resolve_llm_provider
 from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 
@@ -179,6 +180,12 @@ class AASValidator:
             is_complete = final_validation.get('complete', False)
             missing = final_validation.get('missing', [])
             suggestions = final_validation.get('suggestions', [])
+
+        # Enforce template structure before saving/reporting
+        sanitized_completed = {}
+        for submodel_key, submodel_data in completed_data.items():
+            sanitized_completed[submodel_key] = sanitize_submodel_data(submodel_key, submodel_data)
+        completed_data = sanitized_completed
 
         # Build validation report
         validation_report = {

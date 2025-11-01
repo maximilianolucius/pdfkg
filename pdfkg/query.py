@@ -172,8 +172,9 @@ def retrieve_chunks_global(
     print(f"DEBUG QUERY: Using model: {model_name}, top_k: {top_k}")
 
     # Check if Milvus is available
-    if not hasattr(storage, 'milvus_client') or storage.milvus_client is None:
-        raise RuntimeError("Milvus client not available for global search")
+    if not getattr(storage, "use_milvus", False) or not getattr(storage, "milvus_client", None):
+        print("DEBUG QUERY: Milvus unavailable, skipping global retrieval")
+        return []
 
     # Encode question
     print(f"DEBUG QUERY: Encoding question...")

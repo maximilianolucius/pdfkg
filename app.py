@@ -64,6 +64,7 @@ from pdfkg.aas_xml_generator import generate_aas_xml
 from pdfkg.template_extractor import extract_submodels, available_submodels
 from pdfkg.submodel_templates import get_template
 from pdfkg import llm_stats
+from pdfkg.template_utils import sanitize_submodel_data, filter_metadata
 
 
 # System logs buffer (thread-safe)
@@ -920,12 +921,13 @@ def generate_selected_aasx(llm_provider, selected_submodels, state, progress=gr.
             system_logger.log(f'No JSON content for submodel {key}.', 'WARNING')
             continue
         try:
-            compiled[key] = json.loads(raw_json)
+            parsed_json = json.loads(raw_json)
         except json.JSONDecodeError as exc:
             message = f"Invalid JSON for submodel {get_template(key).display_name}: {exc}"
             system_logger.log(message, 'ERROR')
             return message, gr.update(value=None, visible=False), preview_reset
-        metadata_map[key] = entry.get('metadata', {})
+        compiled[key] = sanitize_submodel_data(key, parsed_json)
+        metadata_map[key] = filter_metadata(key, entry.get('metadata', {}) or {})
 
     if not compiled:
         message = 'No submodel data available. Extract or edit templates first.'
@@ -1093,7 +1095,7 @@ def build_cross_document_relationships(storage, similarity_threshold: float = 0.
 
     # Get Milvus client if available
     milvus_client = None
-    if hasattr(storage, 'milvus_client') and storage.milvus_client:
+    if getattr(storage, "use_milvus", False) and getattr(storage, "milvus_client", None):
         milvus_client = storage.milvus_client
         print("✓ Milvus client available for semantic search")
     else:
@@ -1407,6 +1409,10 @@ def validate_aas(llm_provider: Optional[str] = None):
             storage=storage,
             llm_provider=llm_provider
         )
+        completed_data = {
+            key: sanitize_submodel_data(key, value)
+            for key, value in (completed_data or {}).items()
+        }
 
         # Build result message
         if not validation_report:

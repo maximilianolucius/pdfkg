@@ -188,20 +188,37 @@ class ArangoStorage(StorageBackend):
             # Save to Milvus
             try:
                 self.milvus_client.save_embeddings(slug, embeddings, chunk_ids)
+                return
             except Exception as e:
-                print(f"⚠️  Milvus save failed: {e}, falling back to FAISS")
-                # Fallback to FAISS
+                print(f"⚠️  Milvus save failed: {e}, permanently falling back to FAISS for embeddings.")
+                # Disable Milvus usage for subsequent calls
+                try:
+                    self.milvus_client.disconnect()
+                except Exception:
+                    pass
+                self.milvus_client = None
+                self.use_milvus = False
+                os.environ["USE_MILVUS"] = "false"
                 if not hasattr(self, 'faiss_dir'):
                     self.faiss_dir = Path("data") / "faiss_indexes"
                     self.faiss_dir.mkdir(parents=True, exist_ok=True)
-                index = faiss.IndexFlatIP(embeddings.shape[1])
-                index.add(embeddings)
-                faiss.write_index(index, str(self.faiss_dir / f"{slug}.faiss"))
-        else:
-            # Save FAISS index to filesystem
-            index = faiss.IndexFlatIP(embeddings.shape[1])
-            index.add(embeddings)
-            faiss.write_index(index, str(self.faiss_dir / f"{slug}.faiss"))
+
+        # Save FAISS index to filesystem
+        if not hasattr(self, 'faiss_dir'):
+            self.faiss_dir = Path("data") / "faiss_indexes"
+            self.faiss_dir.mkdir(parents=True, exist_ok=True)
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings)
+        faiss.write_index(index, str(self.faiss_dir / f"{slug}.faiss"))
+
+        # Persist chunk metadata for fallback searches/debugging
+        chunk_meta_path = self.faiss_dir / f"{slug}_chunks.json"
+        if chunk_ids is None:
+            chunk_ids = [f"{slug}_chunk_{i}" for i in range(embeddings.shape[0])]
+        try:
+            chunk_meta_path.write_bytes(orjson.dumps(chunk_ids))
+        except Exception as meta_exc:
+            print(f"⚠️  Failed to persist chunk metadata for {slug}: {meta_exc}")
 
     def load_embeddings(self, slug: str):
         """Load embeddings from Milvus or FAISS (returns Milvus-compatible interface)."""

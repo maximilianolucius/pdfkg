@@ -342,7 +342,7 @@ class CrossDocumentAnalyzer:
         Returns:
             List of SemanticLink objects
         """
-        if not self.milvus_client:
+        if not self.milvus_client or not getattr(self.storage, "use_milvus", False):
             print("⚠️  Milvus client not available, skipping semantic similarity")
             return []
 
@@ -416,7 +416,7 @@ class CrossDocumentAnalyzer:
         Returns:
             Dictionary with topic assignments and metadata
         """
-        if not self.milvus_client:
+        if not self.milvus_client or not getattr(self.storage, "use_milvus", False):
             print("⚠️  Milvus client not available, skipping topic clustering")
             return {}
 

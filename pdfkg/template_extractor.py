@@ -14,6 +14,7 @@ import logging
 from pdfkg.llm.config import resolve_llm_provider
 from pdfkg.llm.mistral_client import chat as mistral_chat, get_model_name as get_mistral_model_name
 from pdfkg.submodel_templates import get_template, list_submodel_templates
+from pdfkg.template_utils import sanitize_submodel_data, filter_metadata
 from pdfkg import llm_stats
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,9 @@ class TemplateAASExtractor:
 
             template = get_template(submodel)
             data, metadata = self._extract_submodel(submodel, template.schema, pdf_slugs)
-            results[submodel] = ExtractionResult(data=data, metadata=metadata)
+            sanitized_data = sanitize_submodel_data(submodel, data)
+            sanitized_metadata = filter_metadata(submodel, metadata)
+            results[submodel] = ExtractionResult(data=sanitized_data, metadata=sanitized_metadata)
 
         if progress_callback:
             progress_callback(1.0, "Extraction complete.")
@@ -362,7 +365,7 @@ class TemplateAASExtractor:
         return (
             f"You are extracting data for the '{field_label}' field (path: {field_path}) of the {submodel} submodel.\n"
             "Use only the evidence provided. If the information is missing, return null with confidence 0.0.\n"
-            "Respond in JSON with the following structure:\n"
+            "Respond in JSON with the following structure and do not add or rename keys:\n"
             '{"value": ..., "confidence": 0.0-1.0, "sources": ["..."], "notes": "optional"}'
             "\n\nEvidence:\n"
             f"{evidence_block}\n"
@@ -373,7 +376,7 @@ class TemplateAASExtractor:
         return (
             f"You are extracting a list for path '{field_path}' within the {submodel} submodel.\n"
             "Use only the evidence provided. Fill the template structure for each list entry.\n"
-            "Respond in JSON with the structure:\n"
+            "Respond in JSON with the structure below and do not add or rename keys:\n"
             '{"items": [ ... ], "confidence": 0.0-1.0, "sources": ["..."], "notes": "optional"}'
             "\n\nItem template (JSON):\n"
             f"```json\n{template_json}\n```\n\n"
